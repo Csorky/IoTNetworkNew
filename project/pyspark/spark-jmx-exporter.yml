@@ -1,0 +1,9 @@
+---
+lowercaseOutputName: true
+whitelistObjectNames:
+  - "org.apache.spark:*"
+  - "spark.metrics:*"
+  - "java.lang:type=OperatingSystem"
+  - "java.lang:type=Memory"
+  - "java.lang:type=Threading"
+
