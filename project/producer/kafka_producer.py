@@ -27,12 +27,19 @@ def create_producer():
 def stream_device_data(df, device_ip, producer):
     # Filter data for the specific device by IP address
     device_data = df[df['Src_IP'] == device_ip]
-    
+    # Number of rows to be sent every second
+    n_rows = 10
+    cnt = 0
     # Stream the filtered data for the device to the Kafka topic
     for _, row in device_data.iterrows():
         data = row.to_dict()
         producer.send('iot_topic', value=data)
-        time.sleep(1)  # Simulate real-time streaming
+
+        if cnt >= n_rows:
+            time.sleep(1)  # Simulate real-time streaming
+            cnt = 0
+        
+        cnt += 1
     
     print(f"Data streaming for device with IP {device_ip} completed.")
 
