@@ -90,25 +90,28 @@ def main():
     query_device_1 = df_device_1.writeStream \
         .outputMode("append") \
         .foreachBatch(record_metrics) \
+        .format("console") \
         .option("checkpointLocation", checkpoint_dir + "/device_1") \
         .start()
 
     query_device_2 = df_device_2.writeStream \
         .outputMode("append") \
         .foreachBatch(record_metrics) \
+        .format("console") \
         .option("checkpointLocation", checkpoint_dir + "/device_2") \
         .start()
 
     query_device_3 = df_device_3.writeStream \
         .outputMode("append") \
         .foreachBatch(record_metrics) \
+        .format("console") \
         .option("checkpointLocation", checkpoint_dir + "/device_3") \
         .start()
 
     # Await termination of the streams
     query_device_1.awaitTermination()
-    query_device_2.awaitTermination()
-    query_device_3.awaitTermination()
+    # query_device_2.awaitTermination()
+    # query_device_3.awaitTermination()
 
 if __name__ == "__main__":
     main()
