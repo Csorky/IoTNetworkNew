@@ -6,6 +6,7 @@ import json
 import time
 import sys
 from kafka.errors import NoBrokersAvailable
+from threading import Thread
 
 def create_producer():
     """
@@ -31,50 +32,83 @@ def create_producer():
         print("Failed to connect to Kafka broker after multiple attempts. Exiting.")
         sys.exit(1)
 
-def stream_data(df, producer, batch_size=10, delay=1):
+def stream_data(df, producer, topic, batch_size=10, delay=1):
     """
     Stream data to Kafka at a controlled rate.
 
     :param df: Pandas DataFrame containing the dataset.
     :param producer: KafkaProducer instance.
+    :param topic: Kafka topic to stream data to.
     :param batch_size: Number of records to send per batch.
     :param delay: Delay in seconds between batches.
     """
     total_records = len(df)
-    print(f"Streaming {total_records} records to Kafka.")
+    print(f"Streaming {total_records} records to Kafka topic '{topic}'.")
 
     for start in range(0, total_records, batch_size):
         end = start + batch_size
         batch = df.iloc[start:end].to_dict(orient='records')
         for record in batch:
-            producer.send('iot_topic', value=record)
+            producer.send(topic, value=record)
         producer.flush()
-        print(f"Sent batch {start//batch_size + 1} ({len(batch)} records).")
-        time.sleep(delay)  # Maintain 1-second interval between batches
+        print(f"Sent batch {start//batch_size + 1} ({len(batch)} records) to topic '{topic}'.")
+        time.sleep(delay)  # Maintain interval between batches
 
-    print("Data streaming to Kafka completed.")
+    print(f"Data streaming to Kafka topic '{topic}' completed.")
+
+def stream_full_data():
+    """
+    Function to stream the full dataset to 'iot_topic_full'.
+    """
+    try:
+        df_full = pd.read_csv('/data/iot_network_intrusion_dataset_full.csv')
+    except FileNotFoundError:
+        print("Full dataset file not found. Ensure the CSV is available at /data/iot_network_intrusion_dataset_full.csv")
+        sys.exit(1)
+
+    producer_full = create_producer()
+    try:
+        stream_data(df_full, producer_full, topic='iot_topic_full', batch_size=50, delay=0.1)  # Faster rate
+    finally:
+        producer_full.flush()
+        producer_full.close()
+        print("Producer for 'iot_topic_full' has been closed.")
+
+def stream_filtered_data():
+    """
+    Function to stream the filtered dataset to 'iot_topic'.
+    """
+    try:
+        df_filtered = pd.read_csv('/data/iot_network_intrusion_dataset.csv')
+    except FileNotFoundError:
+        print("Filtered dataset file not found. Ensure the CSV is available at /data/iot_network_intrusion_dataset.csv")
+        sys.exit(1)
+
+    producer_filtered = create_producer()
+    try:
+        stream_data(df_filtered, producer_filtered, topic='iot_topic', batch_size=10, delay=1)  # Slower rate
+    finally:
+        producer_filtered.flush()
+        producer_filtered.close()
+        print("Producer for 'iot_topic' has been closed.")
 
 def main():
     """
-    Main function to initiate Kafka producer and start streaming data.
+    Main function to initiate Kafka producers and start streaming data in parallel.
     """
-    # Read the dataset
-    try:
-        df = pd.read_csv('/data/iot_network_intrusion_dataset.csv')
-    except FileNotFoundError:
-        print("Dataset file not found. Ensure the CSV is available at /data/iot_network_intrusion_dataset.csv")
-        sys.exit(1)
+    # Create threads for parallel streaming
+    thread_full = Thread(target=stream_full_data)
+    thread_filtered = Thread(target=stream_filtered_data)
 
-    # Create a Kafka Producer
-    producer = create_producer()
+    # Start threads
+    thread_full.start()
+    thread_filtered.start()
 
-    # Stream data to Kafka
-    stream_data(df, producer, batch_size=10, delay=1)  # 10 records per second
+    # Wait for both threads to complete
+    thread_full.join()
+    thread_filtered.join()
 
-    # Close the producer after data streaming
-    producer.flush()
-    producer.close()
-    print("Kafka producer has been closed.")
+    print("Both Kafka data streams have been completed.")
 
 if __name__ == "__main__":
     main()
