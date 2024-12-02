@@ -3,10 +3,12 @@
 from prometheus_client import start_http_server, Counter, Gauge
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import from_json, col
+from pyspark.sql import functions as F
 from pyspark.sql.types import *
 import threading
 from menelaus.change_detection import CUSUM  # Import only necessary classes
-from sliding_window import process_device_metrics, sliding_window_aggregation
+from pipeline1.sliding_window import process_device_metrics, sliding_window_aggregation
+from pipeline1.ema import ExponentialMovingAverage
 
 # Initialize Spark Session
 def initialize_spark():
@@ -27,6 +29,8 @@ processed_records = Counter('processed_records_total', 'Total number of records 
 processing_latency = Gauge('processing_latency', 'Latency in processing records')
 window_avg_flow_duration_gauge = Gauge('window_avg_flow_duration','Average flow duration for the sliding window')
 window_event_count_gauge = Gauge('window_event_count','Number of events in the sliding window')
+ema_flow_duration_gauge = Gauge('ema_flow_duration', 'Exponential Moving Average of flow duration for each source IP', ['src_ip'])
+
 
 # Start Prometheus metrics server
 def start_prometheus_server():
@@ -49,12 +53,6 @@ class DeviceDriftDetectors:
     
 
     def update_drift(self, data_univariate, data_multivariate):
-        """
-        Update drift detectors with new data.
-        
-        :param data_univariate: Iterable univariate data (list or array).
-        :param data_multivariate: Iterable multivariate data (list of tuples or arrays).
-        """
         
         for value in data_univariate:
             self.cusum.update(value)
@@ -72,6 +70,8 @@ class DeviceDriftDetectors:
 def main():
     spark = initialize_spark()
     spark.sparkContext.setLogLevel("WARN")
+
+    
     
     # Define the schema based on your dataset fields
     schema = StructType([
@@ -105,6 +105,9 @@ def main():
     # Start Prometheus metrics server
     start_prometheus_server()
 
+    global ema_calculator  # Make it accessible in `record_metrics`
+    ema_calculator = ExponentialMovingAverage(alpha=0.1)
+
     # Define device IPs (known IPs for each device)
     device_ips = ['192.168.0.13', '192.168.0.24', '192.168.0.16']
 
@@ -123,6 +126,7 @@ def main():
 
         sliding_window_df = sliding_window_aggregation(batch_df, window_size="10 minutes", slide_duration="5 minutes")
         windowed_metrics = sliding_window_df.collect()
+
         for row in windowed_metrics:
             print(f"Window: {row['window']}, Avg Flow Duration: {row['avg_flow_duration']}, Event Count: {row['event_count']}")
 
@@ -148,6 +152,16 @@ def main():
             device_df = batch_df.filter(col("Src_IP") == ip)
             if device_df.rdd.isEmpty():
                 continue
+
+            avg_flow_duration = device_df.agg(F.avg("Flow_Duration").alias("avg_flow_duration")).collect()[0]["avg_flow_duration"]
+            if avg_flow_duration is None:
+                continue 
+
+            # Calculate EMA for the device
+            current_ema = ema_calculator.calculate_ema(avg_flow_duration, ip) 
+            # Print and update Prometheus with the EMA
+            print(f"Device: {ip}, EMA Flow Duration: {current_ema}")
+            ema_flow_duration_gauge.labels(src_ip=ip).set(current_ema)     
 
             # Flow duration        
             device_data = process_device_metrics(device_df, ip, flow_duration_gauge)
