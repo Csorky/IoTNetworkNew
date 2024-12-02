@@ -5,8 +5,11 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import from_json, col
 from pyspark.sql.types import *
 import threading
+import time
+import statistics
 
 from menelaus.change_detection import CUSUM  # Import only necessary classes
+
 
 # Initialize Spark Session
 def initialize_spark():
@@ -24,6 +27,12 @@ src_ip_counter = Counter('src_ip_count', 'Number of occurrences of each source I
 flow_id_counter = Counter('flow_id_count', 'Number of processed Flow IDs', ['flow_id'])
 processed_records = Counter('processed_records_total', 'Total number of records processed')
 processing_latency = Gauge('processing_latency', 'Latency in processing records')
+# Add a Prometheus counter for drift events
+drift_event_counter = Counter('drift_events_total', 'Total number of drift events detected', ['src_ip', 'detector'])
+idle_min_gauge = Gauge('idle_min', 'Idle time in minutes for each source IP', ['src_ip'])
+
+idle_min_mean_gauge = Gauge('idle_min_batch', 'Idle time in minutes for 10 values gor each source IP', ['src_ip'])
+
 
 # Start Prometheus metrics server
 def start_prometheus_server():
@@ -72,7 +81,7 @@ class DeviceDriftDetectors:
         # self.pcad.update(data_multivariate)
         # self.kdq_tree.update(data_multivariate)
 
-    def check_drift(self):
+    def check_drift(self, src_ip):
         """
         Check for drift events across all detectors.
         
@@ -81,6 +90,7 @@ class DeviceDriftDetectors:
         drift_events = []
         if self.cusum.drift_state == 'drift':
             drift_events.append('CUSUM Drift detected')
+            drift_event_counter.labels(src_ip=src_ip, detector="CUSUM").inc()  # Increment drift counter
         else:
             print("no drift")
         # Check other detectors as needed
@@ -92,9 +102,10 @@ class DeviceDriftDetectors:
         #     drift_events.append('KdqTree Drift detected')
         return drift_events
 
+
 def main():
     spark = initialize_spark()
-    spark.sparkContext.setLogLevel("WARN")
+    spark.sparkContext.setLogLevel("ERROR")
     
     # Define the schema based on your dataset fields
     schema = StructType([
@@ -131,17 +142,19 @@ def main():
     device_ips = ['192.168.0.13', '192.168.0.24', '192.168.0.16']
 
     # Initialize drift detectors for each device
-    device_detectors = {ip: DeviceDriftDetectors(window_size=10, threshold=5, delta=0.005) for ip in device_ips}  # window_size=10
+    device_detectors = {ip: DeviceDriftDetectors(window_size=10, threshold=15, delta=0.005) for ip in device_ips}  # window_size=10
 
     # Define the processing function for each batch
     def record_metrics(batch_df, epoch_id):
         if batch_df.rdd.isEmpty():
             return
+        
+        start_time = time.time()  # Record start time
 
         # Increment processed records
         record_count = batch_df.count()
         processed_records.inc(record_count)
-        processing_latency.set(0.5)  # Example latency value
+        # processing_latency.set(0.5)  # Example latency value
 
         # Update Prometheus metrics using Spark's aggregations
         src_ip_counts = batch_df.groupBy("Src_IP").count().collect()
@@ -171,15 +184,26 @@ def main():
             data_univariate = device_data['Idle_Min'].values.tolist()  # list of 10 Idle_Min values
             print(data_univariate)
 
+            idle_min_mean_gauge.labels(src_ip=ip).set(statistics.mean(data_univariate))
+
+            for value in data_univariate:
+                idle_min_gauge.labels(src_ip=ip).set(value) 
+
             # Update drift detectors
             device_detectors[ip].update_drift(data_univariate, None)  # Pass None for multivariate
 
             # Check for drift events
-            drift_events = device_detectors[ip].check_drift()
+            drift_events = device_detectors[ip].check_drift(ip)
             print("drift_events")
             print(drift_events)
             for event in drift_events:
                 print(f"Device {ip}: {event} at epoch {epoch_id}")
+        end_time = time.time()
+        latency = end_time - start_time
+        processing_latency.set(latency)  # Set actual processing latency
+
+        # Log the latency for debugging
+        print(f"Batch processed in {latency:.2f} seconds")
 
     # Start the streaming query with foreachBatch and trigger settings
     query = df_parsed.writeStream \
