@@ -4,8 +4,9 @@ FROM bitnami/spark:3.4.0
 
 WORKDIR /app
 
-# Copy the PySpark application
+# Copy the PySpark application and supporting Python files
 COPY pyspark_streaming.py /app/
+COPY sliding_window.py /app/
 
 # Copy the JMX Prometheus Java agent and the exporter configuration
 COPY jmx_prometheus_javaagent-1.0.1.jar /opt/bitnami/spark/jars/
@@ -15,7 +16,7 @@ COPY metrics.properties /opt/bitnami/spark/conf/
 # Set environment variables for Spark and Python
 ENV SPARK_HOME=/opt/bitnami/spark
 ENV PATH=$SPARK_HOME/bin:$PATH
-ENV PYTHONPATH=$SPARK_HOME/python/:$PYTHONPATH
+ENV PYTHONPATH=$SPARK_HOME/python/:$PYTHONPATH:/app 
 ENV PYSPARK_PYTHON=python3
 
 # Install necessary Python libraries including Menelaus and prometheus-client

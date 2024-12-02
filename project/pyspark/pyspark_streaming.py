@@ -5,8 +5,8 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import from_json, col
 from pyspark.sql.types import *
 import threading
-
 from menelaus.change_detection import CUSUM  # Import only necessary classes
+from sliding_window import process_device_metrics
 
 # Initialize Spark Session
 def initialize_spark():
@@ -22,6 +22,7 @@ def initialize_spark():
 # Define Prometheus metrics
 src_ip_counter = Counter('src_ip_count', 'Number of occurrences of each source IP', ['src_ip'])
 flow_id_counter = Counter('flow_id_count', 'Number of processed Flow IDs', ['flow_id'])
+flow_duration_gauge = Gauge('flow_duration', 'Flow duration for each source IP', ['src_ip'])
 processed_records = Counter('processed_records_total', 'Total number of records processed')
 processing_latency = Gauge('processing_latency', 'Latency in processing records')
 
@@ -33,13 +34,7 @@ def start_prometheus_server():
 # Device-specific Drift Detectors
 class DeviceDriftDetectors:
     def __init__(self, window_size=10, threshold=5, delta=0.005):
-        """
-        Initialize drift detectors with required parameters.
         
-        :param window_size: Number of recent data points to consider.
-        :param threshold: Sensitivity threshold for CUSUM.
-        :param delta: Minimum detectable change.
-        """
         # Initialize univariate detector for CUSUM
         self.cusum = CUSUM(
             target=None,      # Let CUSUM estimate target from initial data
@@ -49,10 +44,7 @@ class DeviceDriftDetectors:
             threshold=threshold,  # Threshold for drift detection
             direction=None    # Monitor both increases and decreases
         )
-        # Initialize other detectors as needed
-        # self.page_hinkley = PageHinkley(window_size=window_size, delta=0.005, threshold=threshold)
-        # self.pcad = PCACD(window_size=100)
-        # self.kdq_tree = KdqTreeStreaming(parameters)
+    
 
     def update_drift(self, data_univariate, data_multivariate):
         """
@@ -61,35 +53,18 @@ class DeviceDriftDetectors:
         :param data_univariate: Iterable univariate data (list or array).
         :param data_multivariate: Iterable multivariate data (list of tuples or arrays).
         """
-        # Update CUSUM with univariate data
+        
         for value in data_univariate:
             self.cusum.update(value)
-        # Update other detectors as needed
-        # for value in data_univariate:
-        #     self.page_hinkley.update(value)
         
-        # Update multivariate detectors if implemented
-        # self.pcad.update(data_multivariate)
-        # self.kdq_tree.update(data_multivariate)
-
     def check_drift(self):
-        """
-        Check for drift events across all detectors.
         
-        :return: List of detected drift events.
-        """
         drift_events = []
         if self.cusum.drift_state == 'drift':
             drift_events.append('CUSUM Drift detected')
         else:
             print("no drift")
-        # Check other detectors as needed
-        # if self.page_hinkley.drift_state == 'drift':
-        #     drift_events.append('Page Hinkley Drift detected')
-        # if self.pcad.drift_state == 'drift':
-        #     drift_events.append('PCA-CD Drift detected')
-        # if self.kdq_tree.drift_state == 'drift':
-        #     drift_events.append('KdqTree Drift detected')
+
         return drift_events
 
 def main():
@@ -101,6 +76,7 @@ def main():
         StructField("Flow_ID", StringType(), True),
         StructField("Src_IP", StringType(), True),
         StructField("Src_Port", IntegerType(), True),
+        StructField("Flow_Duration", IntegerType(), True),
         StructField("Dst_IP", StringType(), True),
         StructField("Dst_Port", IntegerType(), True),
         StructField("Protocol", StringType(), True),
@@ -159,9 +135,8 @@ def main():
             device_df = batch_df.filter(col("Src_IP") == ip)
             if device_df.rdd.isEmpty():
                 continue
-
-            # Collect the data for the device
-            device_data = device_df.select("Idle_Min", "Src_IP").toPandas()
+   
+            device_data = process_device_metrics(device_df, ip, flow_duration_gauge)
 
             if device_data.empty:
                 continue
