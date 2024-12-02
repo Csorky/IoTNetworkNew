@@ -5,8 +5,13 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import from_json, col
 from pyspark.sql.types import *
 import threading
+import pandas as pd
 
 from menelaus.change_detection import CUSUM  # Import only necessary classes
+from menelaus.change_detection import PageHinkley  # Import only necessary classes
+from menelaus.change_detection import ADWIN  # Import only necessary classes
+
+
 
 # Initialize Spark Session
 def initialize_spark():
@@ -25,9 +30,14 @@ flow_id_counter = Counter('flow_id_count', 'Number of processed Flow IDs', ['flo
 processed_records = Counter('processed_records_total', 'Total number of records processed')
 processing_latency = Gauge('processing_latency', 'Latency in processing records')
 
+batch_sum = Gauge('batch_sum', '',['src_ip'])
+batch_mean = Gauge('batch_mean', '',['src_ip'])
+batch_value = Gauge("batc_value","",['src_ip'])
+adwin_mean = Gauge("adwin_mean", "",['src_ip'])
+
 # Start Prometheus metrics server
 def start_prometheus_server():
-    threading.Thread(target=start_http_server, args=(7000,), daemon=True).start()
+    threading.Thread(target=start_http_server, args=(7001,), daemon=True).start()
     print("Prometheus server started on port 7000")
 
 # Device-specific Drift Detectors
@@ -50,7 +60,9 @@ class DeviceDriftDetectors:
             direction=None    # Monitor both increases and decreases
         )
         # Initialize other detectors as needed
-        # self.page_hinkley = PageHinkley(window_size=window_size, delta=0.005, threshold=threshold)
+        self.page_hinkley = PageHinkley(delta=0.01, threshold=15, burn_in=30)
+
+        self.adwin = ADWIN()
         # self.pcad = PCACD(window_size=100)
         # self.kdq_tree = KdqTreeStreaming(parameters)
 
@@ -63,11 +75,16 @@ class DeviceDriftDetectors:
         """
         # Update CUSUM with univariate data
         for value in data_univariate:
+            # print("CUSUM Update value", value)
             self.cusum.update(value)
+   
         # Update other detectors as needed
-        # for value in data_univariate:
-        #     self.page_hinkley.update(value)
+        for value in data_univariate:
+            # print("PH Update value", value)
+            self.page_hinkley.update(value)
         
+        for value in data_univariate:
+            self.adwin.update(value)
         # Update multivariate detectors if implemented
         # self.pcad.update(data_multivariate)
         # self.kdq_tree.update(data_multivariate)
@@ -82,19 +99,28 @@ class DeviceDriftDetectors:
         if self.cusum.drift_state == 'drift':
             drift_events.append('CUSUM Drift detected')
         else:
-            print("no drift")
+            print("No CUSUM")
         # Check other detectors as needed
-        # if self.page_hinkley.drift_state == 'drift':
-        #     drift_events.append('Page Hinkley Drift detected')
-        # if self.pcad.drift_state == 'drift':
-        #     drift_events.append('PCA-CD Drift detected')
-        # if self.kdq_tree.drift_state == 'drift':
-        #     drift_events.append('KdqTree Drift detected')
-        return drift_events
+        if self.page_hinkley.drift_state == 'drift':
+            drift_events.append('Page Hinkley Drift detected')
+        else:
+            print("No PH")
+
+        rec_list = []
+        if self.adwin.drift_state == 'drift':
+            drift_events.append('ADWIN Drift detected')
+            retrain_start = self.adwin.retraining_recs[0]
+            retrain_end = self.adwin.retraining_recs[1]
+            rec_list.append([retrain_start, retrain_end])
+        else:
+            print("No ADWIN")
+
+        return drift_events, rec_list, self.adwin.mean()
 
 def main():
     spark = initialize_spark()
-    spark.sparkContext.setLogLevel("WARN")
+    # spark.sparkContext.setLogLevel("WARN")
+    spark.sparkContext.setLogLevel("ERROR")
     
     # Define the schema based on your dataset fields
     schema = StructType([
@@ -169,15 +195,26 @@ def main():
             print(device_data)
             # Extract features
             data_univariate = device_data['Idle_Min'].values.tolist()  # list of 10 Idle_Min values
-            print(data_univariate)
+
+            batch_sum.labels(src_ip=ip).set(sum(data_univariate))
+            batch_mean.labels(src_ip=ip).set(sum(data_univariate) / 10)
+
+            for v in data_univariate:
+                batch_value.labels(src_ip = ip).set(v)
 
             # Update drift detectors
             device_detectors[ip].update_drift(data_univariate, None)  # Pass None for multivariate
 
             # Check for drift events
-            drift_events = device_detectors[ip].check_drift()
+            drift_events, rec_list, adw = device_detectors[ip].check_drift()
+
+            adwin_mean.labels(src_ip = ip).set(adw)
+
             print("drift_events")
             print(drift_events)
+            print(rec_list)
+            print(adw)
+            print()
             for event in drift_events:
                 print(f"Device {ip}: {event} at epoch {epoch_id}")
 

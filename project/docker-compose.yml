@@ -57,7 +57,9 @@ services:
       - ./pyspark:/app
     ports:
       - "8000:8000" # Original JMX port
-      - "7000:7000" # Add this for the Python Prometheus client
+      # - "7000:7000" # Add this for the Python Prometheus client
+      - "7001:7001" # Add this for the Python Prometheus client
+
 
   prometheus:
     image: prom/prometheus:latest
