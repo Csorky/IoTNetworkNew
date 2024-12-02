@@ -17,17 +17,7 @@ def sliding_window_aggregation(df: DataFrame, window_size: str = "10 minutes", s
         )
 
 def process_device_metrics(device_df, ip, flow_duration_gauge):
-    """
-    Process Flow_Duration and Idle_Min metrics for a specific device IP.
-    
-    Args:
-    - device_df (DataFrame): Filtered DataFrame for the specific device.
-    - ip (str): Device IP being processed.
-    - flow_duration_gauge (Gauge): Prometheus Gauge to update average flow duration.
-    
-    Returns:
-    - device_data (DataFrame): Processed data as a Pandas DataFrame or None if empty.
-    """
+   
     if device_df.rdd.isEmpty():
         return None
 

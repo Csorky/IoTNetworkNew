@@ -6,7 +6,7 @@ from pyspark.sql.functions import from_json, col
 from pyspark.sql.types import *
 import threading
 from menelaus.change_detection import CUSUM  # Import only necessary classes
-from sliding_window import process_device_metrics
+from sliding_window import process_device_metrics, sliding_window_aggregation
 
 # Initialize Spark Session
 def initialize_spark():
@@ -25,6 +25,8 @@ flow_id_counter = Counter('flow_id_count', 'Number of processed Flow IDs', ['flo
 flow_duration_gauge = Gauge('flow_duration', 'Flow duration for each source IP', ['src_ip'])
 processed_records = Counter('processed_records_total', 'Total number of records processed')
 processing_latency = Gauge('processing_latency', 'Latency in processing records')
+window_avg_flow_duration_gauge = Gauge('window_avg_flow_duration','Average flow duration for the sliding window')
+window_event_count_gauge = Gauge('window_event_count','Number of events in the sliding window')
 
 # Start Prometheus metrics server
 def start_prometheus_server():
@@ -119,6 +121,17 @@ def main():
         processed_records.inc(record_count)
         processing_latency.set(0.5)  # Example latency value
 
+        sliding_window_df = sliding_window_aggregation(batch_df, window_size="10 minutes", slide_duration="5 minutes")
+        windowed_metrics = sliding_window_df.collect()
+        for row in windowed_metrics:
+            print(f"Window: {row['window']}, Avg Flow Duration: {row['avg_flow_duration']}, Event Count: {row['event_count']}")
+
+            # Update Prometheus metrics
+            if row['avg_flow_duration'] is not None:  # Avoid setting NaN or None values
+                window_avg_flow_duration_gauge.set(row['avg_flow_duration'])
+
+        window_event_count_gauge.set(row['event_count'])
+
         # Update Prometheus metrics using Spark's aggregations
         src_ip_counts = batch_df.groupBy("Src_IP").count().collect()
         for row in src_ip_counts:
@@ -135,7 +148,8 @@ def main():
             device_df = batch_df.filter(col("Src_IP") == ip)
             if device_df.rdd.isEmpty():
                 continue
-   
+
+            # Flow duration        
             device_data = process_device_metrics(device_df, ip, flow_duration_gauge)
 
             if device_data.empty:
