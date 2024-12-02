@@ -6,8 +6,9 @@ WORKDIR /app
 
 # Copy the PySpark application and supporting Python files
 COPY pyspark_streaming.py /app/
-COPY pipeline1/sliding_window.py /app/pipeline1/
-COPY pipeline1/ema.py /app/pipeline1/
+COPY pipeline_stat/sliding_window.py /app/pipeline1/
+COPY pipeline_stat/ema.py /app/pipeline1/
+COPY pipeline_kdq/kdq_tree.py /app/pipeline1/
 
 # Copy the JMX Prometheus Java agent and the exporter configuration
 COPY prometheus_metrics/jmx_prometheus_javaagent-1.0.1.jar /opt/bitnami/spark/jars/
