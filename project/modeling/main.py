@@ -50,10 +50,10 @@ def main():
     bin_classifier.split_data()
     bin_classifier.init_and_train_model()
     bin_classifier.predict_val()
-    
-    bin_metrics = bin_classifier.get_metrics()
+    bin_classifier.get_metrics()
 
-    print(bin_metrics)
+    print(bin_classifier.metrics)
+    
 
 
 
