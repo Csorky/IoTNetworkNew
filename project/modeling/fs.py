@@ -32,6 +32,7 @@ def filter_data(dataset):
 
     dataset.drop(zero_std, axis=1, inplace=True)
 
+
 def shapiro_wilk_test(dataset, threshold=0.4):
     data_numeric_new = dataset[np.isfinite(dataset).all(1)]
     shapiro_wilk = data_numeric_new.apply(lambda x: shapiro(x).statistic)

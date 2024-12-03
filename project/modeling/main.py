@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 from fs import correlation, filter_data, shapiro_wilk_test
 from load_data import fetch_dataset
-
+from supervised_model import supervisedModel
 
 def main():
 
@@ -26,11 +26,12 @@ def main():
     # Preprocess the data
     data.drop(["Unnamed: 0", "result", "table", "_start", "_stop", "_time", "_measurement", "host"], axis=1, inplace=True)
 
-    non_numeric_cols = list(set(data.columns) - set(data.select_dtypes([np.number]).columns))
-    #leave only numeric columns and remove highly correlated features
     data_numeric = data.select_dtypes([np.number])
+    non_numeric_cols = list(set(data.columns) - set(data_numeric.columns))
+
+    # remove highly correlated features
     correlation(data_numeric, 0.85)
-    #remove columns with just one unique value
+    # remove columns with just one unique value
     filter_data(data_numeric)
 
     #perform shapiro-wilk test to further reduce number of features
@@ -40,6 +41,19 @@ def main():
     data_res = data_res.join(data[non_numeric_cols])
 
     # Modeling step
+
+    config = {'target' : 'Label',
+              'model' : 'decision_tree',
+              'metrics' : ['accuracy', 'precision', 'recall', 'f1']}
+    
+    bin_classifier = supervisedModel(data_res, config)
+    bin_classifier.split_data()
+    bin_classifier.init_and_train_model()
+    bin_classifier.predict_val()
+    
+    bin_metrics = bin_classifier.get_metrics()
+
+    print(bin_metrics)
 
 
 
