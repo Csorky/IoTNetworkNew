@@ -37,31 +37,3 @@ def shapiro_wilk_test(dataset, threshold=0.4):
     shapiro_wilk = data_numeric_new.apply(lambda x: shapiro(x).statistic)
 
     return data_numeric_new[shapiro_wilk[shapiro_wilk >= threshold].index]
-
-# def main():
-
-
-#     # Preprocess the data
-#     data = pd.read_csv('/data/iot_network_intrusion_dataset.csv')
-#     non_numeric_cols = list(set(data.columns) - set(data.select_dtypes([np.number]).columns))
-#     #leave only numeric columns and remove highly correlated features
-#     data_numeric = data.select_dtypes([np.number])
-#     correlation(data_numeric, 0.85)
-#     #remove columns with just one unique value
-#     filter_data(data_numeric)
-
-#     #perform shapiro-wilk test to further reduce number of features
-#     data_res = shapiro_wilk_test(data_numeric)
-
-#     #add non-numerical rows
-#     data_res = data_res.join(data[non_numeric_cols])
-
-
-
-#     # Modeling step
-
-
-
-
-# if __name__ == "__main__":
-#     main()

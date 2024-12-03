@@ -104,26 +104,3 @@ def fetch_dataset(url, token, org, bucket, measurement, start_time, batch_size=1
 
 
     return df
-
-
-# def main():
-#     #args for fetching dataset
-#     url = os.getenv("INFLUXDB_URL", "http://localhost:8086")
-#     token = os.getenv("INFLUXDB_TOKEN", "qenhpUMJyt_fIzacORn4M_0yTUDQqNJByLxwEJPVn0gZlyhcYphnn4zV59gY6og7oT3ASLynkcAjlJOmoE-zMQ==")
-#     org = os.getenv("INFLUXDB_ORG", "your_org")
-#     bucket = os.getenv("INFLUXDB_BUCKET", "iot_data")
-#     measurement = "kafka_consumer"
-
-#     start_time = (datetime.utcnow() - timedelta(days=5)).isoformat() + "Z"
-#     batch_size = 10000
-
-#     df = fetch_dataset(url, token, org, bucket, measurement, start_time, batch_size)
-#     print(df.head())
-#     print(df.shape)
-
-    
-
-
-
-# if __name__ == "__main__":
-#     main()
