@@ -1,0 +1,1 @@
+# Set up environment variable and only start after all data has been loaded into influxDB 

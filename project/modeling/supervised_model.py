@@ -16,7 +16,7 @@ class supervisedModel():
         data: preprocessed dataset
         config: configuration dictionary. Included keys: target, model, metrics
         """
-        super.__init__(self)
+        super().__init__()
 
         self.data = data
         self.config = config
@@ -67,7 +67,11 @@ class supervisedModel():
             if metric not in supported_metrics:
                 raise ValueError(f"Metric '{metric}' is not supported.")
             
-            self.metrics[metric] = supported_metrics[metric](self.test_y, self.pred_y)
+            if metric == 'precision' or metric == 'recall' or metric == 'f1':
+                self.metrics[metric] = supported_metrics[metric](self.test_y, self.pred_y, average='weighted')
+            
+            else:
+                self.metrics[metric] = supported_metrics[metric](self.test_y, self.pred_y)
 
         return self.metrics
 
