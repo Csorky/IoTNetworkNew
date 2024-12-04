@@ -7,9 +7,10 @@ from pyspark.sql.types import *
 import threading
 import time
 import statistics
-
-from menelaus.change_detection import CUSUM  # Import only necessary classes
-
+import pandas as pd
+from pipelines.cusum_change_detector import DeviceDriftDetectors
+from pipelines.ddm_drift_detection import DeviceDDMDetector
+from pyspark.sql.functions import from_json, col, min as spark_min, max as spark_max, mean as spark_mean
 
 # Initialize Spark Session
 def initialize_spark():
@@ -27,87 +28,31 @@ src_ip_counter = Counter('src_ip_count', 'Number of occurrences of each source I
 flow_id_counter = Counter('flow_id_count', 'Number of processed Flow IDs', ['flow_id'])
 processed_records = Counter('processed_records_total', 'Total number of records processed')
 processing_latency = Gauge('processing_latency', 'Latency in processing records')
-# Add a Prometheus counter for drift events
-drift_event_counter = Counter('drift_events_total', 'Total number of drift events detected', ['src_ip', 'detector'])
-idle_min_gauge = Gauge('idle_min', 'Idle time in minutes for each source IP', ['src_ip'])
 
+# CUSUM metrics
+idle_min_gauge = Gauge('idle_min', 'Idle time in minutes for each source IP', ['src_ip'])
 idle_min_mean_gauge = Gauge('idle_min_batch', 'Idle time in minutes for 10 values gor each source IP', ['src_ip'])
 
+# Prometheus Gauges for per-device global min and max (Flow Duration)
+flow_duration_gauge = Gauge('flow_duration', '', ['src_ip'])
+global_min_gauge = Gauge('global_flow_duration_min', 'Global minimum Flow_Duration for each device', ['src_ip'])
+global_max_gauge = Gauge('global_flow_duration_max', 'Global maximum Flow_Duration for each device', ['src_ip'])
+
+# Initialize globals outside the functions
+global_flow_duration_min = {}
+global_flow_duration_max = {}
 
 # Start Prometheus metrics server
 def start_prometheus_server():
     threading.Thread(target=start_http_server, args=(7000,), daemon=True).start()
     print("Prometheus server started on port 7000")
 
-# Device-specific Drift Detectors
-class DeviceDriftDetectors:
-    def __init__(self, window_size=10, threshold=5, delta=0.005):
-        """
-        Initialize drift detectors with required parameters.
-        
-        :param window_size: Number of recent data points to consider.
-        :param threshold: Sensitivity threshold for CUSUM.
-        :param delta: Minimum detectable change.
-        """
-        # Initialize univariate detector for CUSUM
-        self.cusum = CUSUM(
-            target=None,      # Let CUSUM estimate target from initial data
-            sd_hat=None,      # Let CUSUM estimate standard deviation from initial data
-            burn_in=window_size,  # Number of initial data points to establish baseline
-            delta=delta,      # Sensitivity to changes
-            threshold=threshold,  # Threshold for drift detection
-            direction=None    # Monitor both increases and decreases
-        )
-        # Initialize other detectors as needed
-        # self.page_hinkley = PageHinkley(window_size=window_size, delta=0.005, threshold=threshold)
-        # self.pcad = PCACD(window_size=100)
-        # self.kdq_tree = KdqTreeStreaming(parameters)
 
-    def update_drift(self, data_univariate, data_multivariate):
-        """
-        Update drift detectors with new data.
-        
-        :param data_univariate: Iterable univariate data (list or array).
-        :param data_multivariate: Iterable multivariate data (list of tuples or arrays).
-        """
-        # Update CUSUM with univariate data
-        for value in data_univariate:
-            self.cusum.update(value)
-        # Update other detectors as needed
-        # for value in data_univariate:
-        #     self.page_hinkley.update(value)
-        
-        # Update multivariate detectors if implemented
-        # self.pcad.update(data_multivariate)
-        # self.kdq_tree.update(data_multivariate)
-
-    def check_drift(self, src_ip):
-        """
-        Check for drift events across all detectors.
-        
-        :return: List of detected drift events.
-        """
-        drift_events = []
-        if self.cusum.drift_state == 'drift':
-            drift_events.append('CUSUM Drift detected')
-            drift_event_counter.labels(src_ip=src_ip, detector="CUSUM").inc()  # Increment drift counter
-        else:
-            print("no drift")
-        # Check other detectors as needed
-        # if self.page_hinkley.drift_state == 'drift':
-        #     drift_events.append('Page Hinkley Drift detected')
-        # if self.pcad.drift_state == 'drift':
-        #     drift_events.append('PCA-CD Drift detected')
-        # if self.kdq_tree.drift_state == 'drift':
-        #     drift_events.append('KdqTree Drift detected')
-        return drift_events
-
-
+# Main Streaming Logic
 def main():
     spark = initialize_spark()
     spark.sparkContext.setLogLevel("ERROR")
     
-    # Define the schema based on your dataset fields
     schema = StructType([
         StructField("Flow_ID", StringType(), True),
         StructField("Src_IP", StringType(), True),
@@ -119,10 +64,13 @@ def main():
         StructField("Cat", StringType(), True),
         StructField("Sub_Cat", StringType(), True),
         StructField("Timestamp", StringType(), True),
-        StructField("Idle_Min", FloatType(), True)
+        StructField("Idle_Min", FloatType(), True),
+        StructField("Flow_Duration", FloatType(), True),
+        StructField("Tot_Fwd_Pkts", IntegerType(), True),
+        StructField("Tot_Bwd_Pkts", IntegerType(), True)
     ])
 
-    # Read data from Kafka with maxOffsetsPerTrigger
+    # maxOffsetsPerTrigger limits the number of records read from Kafka in each micro-batch.
     df = spark.readStream \
         .format("kafka") \
         .option("kafka.bootstrap.servers", "kafka:9092") \
@@ -130,74 +78,142 @@ def main():
         .option("maxOffsetsPerTrigger", 30) \
         .load()
 
-    # Parse the "value" column as JSON and extract the fields using the schema
     df_parsed = df.selectExpr("CAST(value AS STRING)") \
         .select(from_json(col("value"), schema).alias("data")) \
         .select("data.*")
 
-    # Start Prometheus metrics server
     start_prometheus_server()
 
-    # Define device IPs (known IPs for each device)
     device_ips = ['192.168.0.13', '192.168.0.24', '192.168.0.16']
+    device_cusum_detectors = {ip: DeviceDriftDetectors(window_size=10, threshold=15, delta=0.005) for ip in device_ips}
+    device_ddm_detectors = {ip: DeviceDDMDetector() for ip in device_ips}
 
-    # Initialize drift detectors for each device
-    device_detectors = {ip: DeviceDriftDetectors(window_size=10, threshold=15, delta=0.005) for ip in device_ips}  # window_size=10
 
-    # Define the processing function for each batch
+    # Dictionaries for tracking per-device global min and max
+    global global_flow_duration_min, global_flow_duration_max
+    global_flow_duration_min = {ip: float("inf") for ip in device_ips}
+    global_flow_duration_max = {ip: float("-inf") for ip in device_ips}
+
+    
+    #  # Initial training phase
+    # print("Collecting data for initial training...")
+    # training_data = df_parsed.filter(df_parsed.Label.isNotNull()).toPandas()
+
+    # if not training_data.empty:
+    #     for ip in device_ips:
+    #         device_data = training_data[training_data["Src_IP"] == ip]
+    #         if device_data.empty:
+    #             continue
+
+    #         # Extract training features and labels
+    #         X_train = device_data[["Flow_Duration", "Tot_Fwd_Pkts", "Tot_Bwd_Pkts"]].values
+    #         y_train = device_data["Label"].values
+
+    #         # Train model for each device
+    #         if not device_ddm_detectors[ip].trained:
+    #             device_ddm_detectors[ip].fit_initial_model(X_train, y_train)
+    #             print(f"Initial model trained for device {ip}")
+
+
+
     def record_metrics(batch_df, epoch_id):
+        global global_flow_duration_min
+        global global_flow_duration_max
+        print("Inside record_metrics - Global Flow_Duration:", global_flow_duration_min)
         if batch_df.rdd.isEmpty():
             return
-        
-        start_time = time.time()  # Record start time
 
-        # Increment processed records
+        start_time = time.time()
         record_count = batch_df.count()
         processed_records.inc(record_count)
-        # processing_latency.set(0.5)  # Example latency value
 
-        # Update Prometheus metrics using Spark's aggregations
+        # Simple statistics part: min, max, mean <- Flow Duration
+        for ip in device_ips:
+            device_df = batch_df.filter(col("Src_IP") == ip)
+            if device_df.rdd.isEmpty():
+                continue
+                
+            # Calculation min/max/mean for batches (micro-batch)    
+            device_agg_metrics = device_df.agg(
+                spark_min("Flow_Duration").alias("Flow_Duration_Min"),
+                spark_max("Flow_Duration").alias("Flow_Duration_Max"),
+                spark_mean("Flow_Duration").alias("Flow_Duration_Mean")
+            ).collect()[0]
+
+            print(f"Device {ip} - Flow_Duration: Min={device_agg_metrics['Flow_Duration_Min']}, "
+                  f"Max={device_agg_metrics['Flow_Duration_Max']}, Mean={device_agg_metrics['Flow_Duration_Mean']:.2f}")
+
+            # Update Prometheus (micro-batch) metrics for each device
+            flow_duration_gauge.labels(src_ip=f"{ip}_min").set(device_agg_metrics["Flow_Duration_Min"])
+            flow_duration_gauge.labels(src_ip=f"{ip}_max").set(device_agg_metrics["Flow_Duration_Max"])
+            flow_duration_gauge.labels(src_ip=ip).set(device_agg_metrics["Flow_Duration_Mean"])
+           
+            batch_min_flow= device_agg_metrics["Flow_Duration_Min"]
+            batch_max_flow = device_agg_metrics["Flow_Duration_Max"]
+        
+            # Update global min and max for this device
+            if batch_min_flow is not None:
+                global_flow_duration_min[ip] = min(global_flow_duration_min[ip], batch_min_flow)
+            if batch_max_flow is not None:
+                global_flow_duration_max[ip] = max(global_flow_duration_max[ip], batch_max_flow)
+
+            # Log the global min and max for this device
+            print(f"Device {ip} - Global Idle_Min: Min={global_flow_duration_min[ip]}, Max={global_flow_duration_max[ip]}")
+
+            # Update Prometheus metrics for this device
+            global_min_gauge.labels(src_ip=ip).set(global_flow_duration_min[ip])
+            global_max_gauge.labels(src_ip=ip).set(global_flow_duration_max[ip])
+
+        # Update Prometheus metrics using Spark's aggregations <- Total number of records by src_ips
         src_ip_counts = batch_df.groupBy("Src_IP").count().collect()
         for row in src_ip_counts:
             if row["Src_IP"]:
                 src_ip_counter.labels(src_ip=row["Src_IP"]).inc(row["count"])
 
-        flow_id_counts = batch_df.groupBy("Flow_ID").count().collect()
-        for row in flow_id_counts:
-            if row["Flow_ID"]:
-                flow_id_counter.labels(flow_id=row["Flow_ID"]).inc(row["count"])
-
+        # Data for Drift Detection (CUSUM + DDM)
         # Iterate over each device IP and process its data
         for ip in device_ips:
             device_df = batch_df.filter(col("Src_IP") == ip)
             if device_df.rdd.isEmpty():
                 continue
-
             # Collect the data for the device
-            device_data = device_df.select("Idle_Min", "Src_IP").toPandas()
-
+            device_data = device_df.select("Idle_Min", "Src_IP","Flow_Duration", "Tot_Fwd_Pkts", "Tot_Bwd_Pkts", "Label").toPandas()
             if device_data.empty:
                 continue
-            
             print(device_data)
-            # Extract features
-            data_univariate = device_data['Idle_Min'].values.tolist()  # list of 10 Idle_Min values
+
+            # CUSUM record metrics
+            data_univariate = device_data['Idle_Min'].values.tolist() 
             print(data_univariate)
-
+            # for cusum visualization
             idle_min_mean_gauge.labels(src_ip=ip).set(statistics.mean(data_univariate))
-
             for value in data_univariate:
                 idle_min_gauge.labels(src_ip=ip).set(value) 
+            # Update CUSUM drift detectors
+            device_cusum_detectors[ip].update_drift(data_univariate, None)  # Pass None for multivariate
 
-            # Update drift detectors
-            device_detectors[ip].update_drift(data_univariate, None)  # Pass None for multivariate
-
-            # Check for drift events
-            drift_events = device_detectors[ip].check_drift(ip)
+            # Check for cusum drift events
+            drift_events = device_cusum_detectors[ip].check_drift(ip)
             print("drift_events")
             print(drift_events)
             for event in drift_events:
-                print(f"Device {ip}: {event} at epoch {epoch_id}")
+                print(f"CUSUM: Device {ip}: {event} at epoch {epoch_id}")
+
+           # DDM Drift Detection
+            # X_test = device_data[["Flow_Duration", "Tot_Fwd_Pkts", "Tot_Bwd_Pkts"]].values
+            # y_true = device_data["Label"].values
+
+            # for i in range(len(X_test)):
+            #     y_pred = device_ddm_detectors[ip].classifier.predict(X_test[i].reshape(1, -1))
+            #     drift_state = device_ddm_detectors[ip].ddm.update(y_true[i], y_pred[0])
+
+            #     if drift_state == "drift":
+            #         drift_event_counter.labels(src_ip=ip, detector="DDM").inc()
+            #         print(f"DDM Drift detected for Device {ip} at epoch {epoch_id}")
+            #     elif drift_state == "warning":
+            #         warning_event_counter.labels(src_ip=ip, detector="DDM").inc()
+            #         print(f"DDM Warning for Device {ip} at epoch {epoch_id}")
+
         end_time = time.time()
         latency = end_time - start_time
         processing_latency.set(latency)  # Set actual processing latency
@@ -205,7 +221,6 @@ def main():
         # Log the latency for debugging
         print(f"Batch processed in {latency:.2f} seconds")
 
-    # Start the streaming query with foreachBatch and trigger settings
     query = df_parsed.writeStream \
         .outputMode("append") \
         .foreachBatch(record_metrics) \
@@ -213,7 +228,6 @@ def main():
         .option("checkpointLocation", "/tmp/spark_checkpoint") \
         .start()
 
-    # Await termination
     query.awaitTermination()
 
 if __name__ == "__main__":
