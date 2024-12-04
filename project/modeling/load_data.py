@@ -8,10 +8,7 @@ from io import StringIO
 import sys
 
 
-n_fails = 0
-
-
-def fetch_batch_data(query_api, bucket, measurement, start_time, batch_size=10000):
+def fetch_batch_data(query_api, bucket, measurement, start_time, batch_size, max_attempts=5):
 
     if not isinstance(start_time, str):
         start_time = start_time.isoformat() + "Z"
@@ -23,22 +20,29 @@ def fetch_batch_data(query_api, bucket, measurement, start_time, batch_size=1000
     |> limit(n: {batch_size})
     |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
     '''
-
-    try:
-
-        raw_data = query_api.query_raw(query) # Get raw data
-
-        # transforming into readabale format
-        data_str = ''.join(chunk.decode('utf-8') for chunk in raw_data)  # Join generator into a single string
-
-        return pd.read_csv(StringIO(data_str), skiprows=range(3))
     
-    except Exception as e:
+    for attempt in range(1, max_attempts+1):
 
-        print(f"Failed to load the batch: {e}. \n Terminating...")
-        # n_fails += 1
-        # if n_fails >= 6:
-        sys.exit()
+        try:
+
+            raw_data = query_api.query_raw(query) # Get raw data
+
+            # transforming into readabale format
+            data_str = ''.join(chunk.decode('utf-8') for chunk in raw_data)  # Join generator into a single string
+
+            return pd.read_csv(StringIO(data_str), skiprows=range(3))
+        
+        except Exception as e:
+
+            print(f"Attempt {attempt} failed to load the batch: {e}.")
+
+            if attempt < max_attempts:
+                time.sleep(2)
+
+            else:
+                print("Max attempts reached. Exiting")
+                sys.exit()
+
 
 # Count query
 # query = f'''
@@ -48,7 +52,7 @@ def fetch_batch_data(query_api, bucket, measurement, start_time, batch_size=1000
 #   |> count()
 #   '''
 
-def fetch_dataset(url, token, org, bucket, measurement, start_time, batch_size=10000, read_timeout=30_000):
+def fetch_dataset(url, token, org, bucket, measurement, start_time, batch_size=10000, read_timeout=20_000):
 
     # Initialize the InfluxDB client
     client = InfluxDBClient(url=url, token=token, org=org, timeout=read_timeout)
