@@ -79,14 +79,14 @@ def stream_filtered_data():
     Function to stream the filtered dataset to 'iot_topic'.
     """
     try:
-        df_filtered = pd.read_csv('/data/iot_network_intrusion_dataset.csv')
+        df_filtered = pd.read_csv('/data/iot_network_intrusion_dataset_stream.csv')
     except FileNotFoundError:
         print("Filtered dataset file not found. Ensure the CSV is available at /data/iot_network_intrusion_dataset.csv")
         sys.exit(1)
 
     producer_filtered = create_producer()
     try:
-        stream_data(df_filtered, producer_filtered, topic='iot_topic', batch_size=10, delay=1)  # Slower rate
+        stream_data(df_filtered, producer_filtered, topic='iot_topic', batch_size=100, delay=1)  # Slower rate
     finally:
         producer_filtered.flush()
         producer_filtered.close()
