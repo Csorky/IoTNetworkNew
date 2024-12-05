@@ -2,4 +2,4 @@
 *.csv
 
 #ignore pycache files
-/pycache/*
+__pycache__/
