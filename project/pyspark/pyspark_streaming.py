@@ -70,6 +70,22 @@ def main():
         StructField("Tot_Bwd_Pkts", IntegerType(), True)
     ])
 
+    # Read initial data from Kafka in batch mode (DDM)
+    initial_df = spark.read \
+        .format("kafka") \
+        .option("kafka.bootstrap.servers", "kafka:9092") \
+        .option("subscribe", "iot_topic") \
+        .option("startingOffsets", "earliest") \
+        .option("endingOffsets", "latest") \
+        .load()
+
+    initial_df_parsed = initial_df.selectExpr("CAST(value AS STRING)") \
+        .select(from_json(col("value"), schema).alias("data")) \
+        .select("data.*")
+
+    # Collect initial data into a Pandas DataFrame
+    initial_data = initial_df_parsed.toPandas()
+
     # maxOffsetsPerTrigger limits the number of records read from Kafka in each micro-batch.
     df = spark.readStream \
         .format("kafka") \
@@ -87,6 +103,18 @@ def main():
     device_ips = ['192.168.0.13', '192.168.0.24', '192.168.0.16']
     device_cusum_detectors = {ip: DeviceDriftDetectors(window_size=10, threshold=15, delta=0.005) for ip in device_ips}
     device_ddm_detectors = {ip: DeviceDDMDetector() for ip in device_ips}
+    
+    #DDM
+    # Train initial models
+    for ip in device_ips:
+        device_data_ddm = initial_data[initial_data['Src_IP'] == ip]
+        if not device_data_ddm.empty:
+            X_train = device_data_ddm[["Flow_Duration", "Tot_Fwd_Pkts", "Tot_Bwd_Pkts"]].values
+            y_train = device_data_ddm["Label"].values
+            device_ddm_detectors[ip].fit_initial_model(X_train, y_train)
+            print(f"Initial model trained for device {ip}")
+        else:
+            print(f"No initial data available for device {ip}.")
 
 
     # Dictionaries for tracking per-device global min and max
@@ -94,27 +122,8 @@ def main():
     global_flow_duration_min = {ip: float("inf") for ip in device_ips}
     global_flow_duration_max = {ip: float("-inf") for ip in device_ips}
 
-    
-    #  # Initial training phase
-    # print("Collecting data for initial training...")
-    # training_data = df_parsed.filter(df_parsed.Label.isNotNull()).toPandas()
-
-    # if not training_data.empty:
-    #     for ip in device_ips:
-    #         device_data = training_data[training_data["Src_IP"] == ip]
-    #         if device_data.empty:
-    #             continue
-
-    #         # Extract training features and labels
-    #         X_train = device_data[["Flow_Duration", "Tot_Fwd_Pkts", "Tot_Bwd_Pkts"]].values
-    #         y_train = device_data["Label"].values
-
-    #         # Train model for each device
-    #         if not device_ddm_detectors[ip].trained:
-    #             device_ddm_detectors[ip].fit_initial_model(X_train, y_train)
-    #             print(f"Initial model trained for device {ip}")
-
-
+    # buffer for training data
+    # device_training_buffers = {ip: {'X': [], 'y': []} for ip in device_ips}
 
     def record_metrics(batch_df, epoch_id):
         global global_flow_duration_min
@@ -199,20 +208,20 @@ def main():
             for event in drift_events:
                 print(f"CUSUM: Device {ip}: {event} at epoch {epoch_id}")
 
-           # DDM Drift Detection
-            # X_test = device_data[["Flow_Duration", "Tot_Fwd_Pkts", "Tot_Bwd_Pkts"]].values
-            # y_true = device_data["Label"].values
+           # Make predictions and update DDM
+            X_test = device_data[["Flow_Duration", "Tot_Fwd_Pkts", "Tot_Bwd_Pkts"]].values
+            y_true = device_data["Label"].values
 
-            # for i in range(len(X_test)):
-            #     y_pred = device_ddm_detectors[ip].classifier.predict(X_test[i].reshape(1, -1))
-            #     drift_state = device_ddm_detectors[ip].ddm.update(y_true[i], y_pred[0])
+            for i in range(len(X_test)):
+                y_pred = device_ddm_detectors[ip].classifier.predict([X_test[i]])
+                drift_state = device_ddm_detectors[ip].ddm.update(y_true[i], y_pred[0])
 
-            #     if drift_state == "drift":
-            #         drift_event_counter.labels(src_ip=ip, detector="DDM").inc()
-            #         print(f"DDM Drift detected for Device {ip} at epoch {epoch_id}")
-            #     elif drift_state == "warning":
-            #         warning_event_counter.labels(src_ip=ip, detector="DDM").inc()
-            #         print(f"DDM Warning for Device {ip} at epoch {epoch_id}")
+                if drift_state == "drift":
+                    print(f"DDM Drift detected for Device {ip} at epoch {epoch_id}")
+                    # Optionally retrain model with recent data
+                    device_ddm_detectors[ip].retrain_model()
+                elif drift_state == "warning":
+                    print(f"DDM Warning for Device {ip} at epoch {epoch_id}")
 
         end_time = time.time()
         latency = end_time - start_time
