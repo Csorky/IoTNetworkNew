@@ -1,5 +1,6 @@
 from menelaus.concept_drift import LinearFourRates
 from prometheus_client import Gauge, Counter
+from scipy.stats import ks_2samp
 
 
 
@@ -89,32 +90,45 @@ class LFRDriftDetector:
         self._update_prometheus_metrics()
 
     def _update_baseline(self):
-        """
-        Update the baseline mean and standard deviation using the rolling window.
-        """
-        self.baseline_mean = sum(self.data_window) / len(self.data_window)
-        self.baseline_std = (
-            sum((x - self.baseline_mean) ** 2 for x in self.data_window) / len(self.data_window)
-        ) ** 0.5
+
+        alpha = 0.1  # Smoothing factor for EMA
+        current_mean = sum(self.data_window) / len(self.data_window)
+        current_std = (sum((x - current_mean) ** 2 for x in self.data_window) / len(self.data_window)) ** 0.5
+
+        if self.baseline_mean is None:
+
+            self.baseline_mean = current_mean
+            self.baseline_std = current_std
+
+        else:
+
+            self.baseline_mean = alpha * current_mean + (1 - alpha) * self.baseline_mean
+            self.baseline_std = alpha * current_std + (1 - alpha) * self.baseline_std
 
     def _generate_predictions(self, data):
-        """
-        Generate predictions and ground truth.
+        
+        predictions = []
+        ground_truth = []
 
-        :param data: List of new data points.
-        :return: Tuple (predictions, ground_truth)
-        """
-        predictions = [1 if abs(x - self.baseline_mean) > 3 * self.baseline_std else 0 for x in data]
-        ground_truth = [1 if abs(x - self.baseline_mean) > 2 * self.baseline_std else 0 for x in data]
+        # Statistical test thresholds
+        z_threshold = 3  # Z-score threshold (corresponds to ~99.7% confidence)
+        ks_p_value_threshold = 0.05  # p-value threshold for KS test
+
+        for x in data:
+            # Z-Score Test: Drift detected if |Z| > threshold
+            z_score = abs((x - self.baseline_mean) / self.baseline_std)
+            prediction = 1 if z_score > z_threshold else 0
+
+            # KS Test: Compare new point distribution with baseline
+            _, ks_p_value = ks_2samp([x], self.data_window)
+            ground_truth_value = 1 if ks_p_value < ks_p_value_threshold else 0
+
+            predictions.append(prediction)
+            ground_truth.append(ground_truth_value)
+
         return predictions, ground_truth
-
     def _update_rates(self, predictions, ground_truth):
-        """
-        Update Linear Four Rates based on predictions and ground truth.
 
-        :param predictions: List of binary predictions.
-        :param ground_truth: List of binary ground truth values.
-        """
         tp = sum(p == 1 and gt == 1 for p, gt in zip(predictions, ground_truth))
         fp = sum(p == 1 and gt == 0 for p, gt in zip(predictions, ground_truth))
         fn = sum(p == 0 and gt == 1 for p, gt in zip(predictions, ground_truth))
@@ -129,13 +143,13 @@ class LFRDriftDetector:
         self.rates["tn"] = tn / total_negative if total_negative else 0
 
         self.drift_detected = max(self.rates["fp"], self.rates["fn"]) > self.threshold
+
         if self.drift_detected:
+
             self.metrics["drift_events"].labels(variable_name=self.variable_name, ip=self.ip).inc()
 
     def _update_prometheus_metrics(self):
-        """
-        Update Prometheus metrics for LFR.
-        """
+
         self.metrics["true_positive_rate"].labels(variable_name=self.variable_name, ip=self.ip).set(self.rates["tp"])
         self.metrics["false_positive_rate"].labels(variable_name=self.variable_name, ip=self.ip).set(self.rates["fp"])
         self.metrics["false_negative_rate"].labels(variable_name=self.variable_name, ip=self.ip).set(self.rates["fn"])
