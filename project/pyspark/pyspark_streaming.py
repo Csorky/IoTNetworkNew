@@ -1,6 +1,8 @@
 # pyspark/pyspark_streaming.py
 import os
 from prometheus_client import start_http_server, Counter, Gauge
+from pipelines.pca_cd_detector import *
+from pipelines.md3_detector import *
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import from_json, col
 from pyspark.sql.types import *
@@ -61,14 +63,20 @@ def main():
         StructField("Dst_IP", StringType(), True),
         StructField("Dst_Port", IntegerType(), True),
         StructField("Protocol", StringType(), True),
+        StructField("Flow_Duration", FloatType(), True),
+        StructField("Tot_Fwd_Pkts", IntegerType(), True),
+        StructField("Tot_Bwd_Pkts", IntegerType(), True),
+        StructField("TotLen_Fwd_Pkts", FloatType(), True),
+        StructField("Active_Max", FloatType(), True),
+        StructField("Active_Min", FloatType(), True),
+        StructField("Idle_Mean", FloatType(), True),
+        StructField("Idle_Std", FloatType(), True),
+        StructField("Idle_Max", FloatType(), True),
+        StructField("Idle_Min", FloatType(), True),
         StructField("Label", StringType(), True),
         StructField("Cat", StringType(), True),
         StructField("Sub_Cat", StringType(), True),
-        StructField("Timestamp", StringType(), True),
-        StructField("Idle_Min", FloatType(), True),
-        StructField("Flow_Duration", FloatType(), True),
-        StructField("Tot_Fwd_Pkts", IntegerType(), True),
-        StructField("Tot_Bwd_Pkts", IntegerType(), True)
+        StructField("Timestamp", StringType(), True)
     ])
 
     # maxOffsetsPerTrigger limits the number of records read from Kafka in each micro-batch.
@@ -88,19 +96,27 @@ def main():
     device_ips = ['192.168.0.13', '192.168.0.24', '192.168.0.16']
     device_cusum_detectors = {ip: CusumDriftDetector(window_size=10, threshold=15, delta=0.005) for ip in device_ips}
     device_ddm_detectors = {ip: DeviceDDMDetector() for ip in device_ips}
+    
+     #Initialize PCA detectors
+    device_pca_cd_detectors = {ip: DevicePCACDDetectors(window_size=100) for ip in device_ips}
 
-    #  Load training data from CSV
-    # training_file = "/data/iot_network_intrusion_dataset_model.csv"  # Update with the correct path to your CSV file
-    try:
-        print('-------------------------------------------------------')
-        print(os.listdir())
-        print(os.getcwd())
+    # Initialize MD3 detectors
+    # Read initial training data from a static CSV file
+    training_data_path = "/data/iot_network_intrusion_dataset_model.csv"
+    device_md3_detectors = {}
+    
+    for ip in device_ips:
+        detector = DeviceMD3Detectors()
+        try:
+            detector.initialize_detector(training_data_path, ip)
+            device_md3_detectors[ip] = detector
+            print(f"Initialized MD3 detector for device {ip}")
+        except ValueError as e:
+            print(f"Could not initialize MD3 detector for device {ip}: {e}")
 
-        training_data = pd.read_csv('iot_network_intrusion_dataset_model.csv')
-        print("Training data successfully loaded.")
-    except Exception as e:
-        print(f"Error loading training data: {e}")
-        return
+
+
+    training_data = pd.read_csv(training_data_path)
 
     
     #DDM
@@ -139,6 +155,15 @@ def main():
             print(f"  - Detected Drifts: {metrics['detected_drifts']}")
             print(f"  - Detected Warnings: {metrics['detected_warnings']}")
 
+    # Initialize dictionaries to store training data per device
+    device_md3_training_data = {ip: [] for ip in device_ips}
+    required_training_samples = 100  # Number of samples needed to initialize the detector
+
+    # Dictionaries for tracking per-device global min and max
+    global global_flow_duration_min, global_flow_duration_max
+    global_flow_duration_min = {ip: float("inf") for ip in device_ips}
+    global_flow_duration_max = {ip: float("-inf") for ip in device_ips}
+
     def record_metrics(batch_df, epoch_id):
         global global_flow_duration_min
         global global_flow_duration_max
@@ -166,6 +191,7 @@ def main():
 
             print(f"Device {ip} - Flow_Duration: Min={device_agg_metrics['Flow_Duration_Min']}, "
                   f"Max={device_agg_metrics['Flow_Duration_Max']}, Mean={device_agg_metrics['Flow_Duration_Mean']:.2f}")
+
 
             # Collect the data for the device
             device_data = device_df.select("Flow_Duration", "Src_IP").toPandas()
@@ -214,6 +240,7 @@ def main():
             device_df = batch_df.filter(col("Src_IP") == ip)
             if device_df.rdd.isEmpty():
                 continue
+                
             # Collect the data for the device
             device_data = device_df.select("Idle_Min", "Src_IP","Flow_Duration", "Tot_Fwd_Pkts", "Tot_Bwd_Pkts", "Label").toPandas()
             if device_data.empty:
@@ -268,14 +295,79 @@ def main():
              # Log accuracy to Prometheus
             flow_duration_gauge.labels(src_ip=f"{ip}_accuracy").set(batch_accuracy)
 
+
+            device_data = device_df.select(
+                "Idle_Min", "Idle_Max", "Idle_Mean", "Idle_Std",
+                "Flow_Duration", "Tot_Fwd_Pkts", "Tot_Bwd_Pkts",
+                "TotLen_Fwd_Pkts", "Active_Max", "Active_Min",
+                "Src_IP", "Label"
+            ).toPandas()
+
+            numeric_features = [
+                "Flow_Duration", "Tot_Fwd_Pkts", "Tot_Bwd_Pkts",
+                "TotLen_Fwd_Pkts", "Active_Max", "Active_Min",
+                "Idle_Min", "Idle_Max", "Idle_Mean", "Idle_Std"
+            ]
+
+
+            #PCA---------------------------------------------------------------------------------------------------------------------------------------------------------------
+            device_numeric_data = device_data[numeric_features]
+            if device_numeric_data.empty:
+                continue
+
+            # Update PCA-CD drift detectors
+            device_pca_cd_detectors[ip].update_drift(device_numeric_data)
+
+            change_score = device_pca_cd_detectors[ip].get_latest_change_score()
+            if change_score is not None:
+                pca_change_score_gauge.labels(src_ip=ip).set(change_score)
+
+
+            num_pcs = device_pca_cd_detectors[ip].get_num_pcs()
+            if num_pcs is not None:
+                pca_num_pcs_gauge.labels(src_ip=ip).set(num_pcs)
+            # Check for PCA-CD drift events
+            drift_events = device_pca_cd_detectors[ip].check_drift(ip)
+            print("PCA-CD drift_events")
+            print(drift_events)
+            for event in drift_events:
+                print(f"PCA-CD: Device {ip}: {event} at epoch {epoch_id}")
+            #PCA---------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+            #MD3---------------------------------------------------------------------------------------------------------------------------------------------
+            # MD3 Detector Update
+
+            if device_data.empty:
+                continue
+
+            # Proceed with updating MD3 detector
+            device_md3_detector = device_md3_detectors.get(ip)
+            if device_md3_detector is None:
+                continue  # Detector not initialized for this IP
+
+            # Update MD3 detector with features
+            device_md3_detector.update_drift(device_data)
+
+            # Check for drift events
+            drift_events = device_md3_detector.check_drift(ip)
+            for event in drift_events:
+                print(f"MD3: Device {ip}: {event} at epoch {epoch_id}")
+
+            # Update Prometheus metrics
+            margin_density = device_md3_detector.get_latest_margin_density()
+            if margin_density is not None:
+                md3_margin_density_gauge.labels(src_ip=ip).set(margin_density)
+            #MD3---------------------------------------------------------------------------------------------------------------------------------------------
+
         end_time = time.time()
         latency = end_time - start_time
         processing_latency.set(latency)  # Set actual processing latency
 
         # Log the latency for debugging
         print(f"Batch processed in {latency:.2f} seconds")
-        report_metrics()
 
+        report_metrics()
+        
     query = df_parsed.writeStream \
         .outputMode("append") \
         .foreachBatch(record_metrics) \
