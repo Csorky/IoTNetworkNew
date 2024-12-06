@@ -36,7 +36,7 @@ def initialize_spark():
 # Define Prometheus metrics
 src_ip_counter = Counter('src_ip_count', 'Number of occurrences of each source IP', ['src_ip'])
 flow_id_counter = Counter('flow_id_count', 'Number of processed Flow IDs', ['flow_id'])
-flow_duration_gauge = Gauge('flow_duration', 'Flow duration for each source IP', ['src_ip'])
+flow_duration_gauge_metric = Gauge('flow_duration_metric', 'Flow duration for each source IP', ['src_ip'])
 processed_records = Counter('processed_records_total', 'Total number of records processed')
 processing_latency = Gauge('processing_latency', 'Latency in processing records')
 
@@ -116,7 +116,6 @@ def main():
         StructField("Flow_ID", StringType(), True),
         StructField("Src_IP", StringType(), True),
         StructField("Src_Port", IntegerType(), True),
-        StructField("Flow_Duration", IntegerType(), True), ### Enes import
         StructField("Dst_IP", StringType(), True),
         StructField("Dst_Port", IntegerType(), True),
         StructField("Protocol", StringType(), True),
@@ -341,7 +340,7 @@ def main():
             current_ema = ema_calculator.calculate_ema(avg_flow_duration, ip) 
             print(f"Device: {ip}, EMA Flow Duration: {current_ema}") # Print and update Prometheus with the EMA
             ema_flow_duration_gauge.labels(src_ip=ip).set(current_ema)               
-            device_data = process_device_metrics(device_df, ip, flow_duration_gauge) # Flow duration
+            device_data = process_device_metrics(device_df, ip, flow_duration_gauge_metric) # Flow duration
             
             if device_data.empty:
                 continue
