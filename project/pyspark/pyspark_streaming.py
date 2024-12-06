@@ -29,6 +29,12 @@ def initialize_spark():
         .getOrCreate()
     return spark
 
+# Define Prometheus metrics
+src_ip_counter = Counter('src_ip_count', 'Number of occurrences of each source IP', ['src_ip'])
+flow_id_counter = Counter('flow_id_count', 'Number of processed Flow IDs', ['flow_id'])
+processed_records = Counter('processed_records_total', 'Total number of records processed')
+processing_latency = Gauge('processing_latency', 'Latency in processing records')
+
 # Page-Hinkley metrics
 ph_drift_detected_counter = Counter('ph_drift_detected_count', '', ['src_ip'])
 ph_monitored_value_gauge = Gauge(

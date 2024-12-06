@@ -15,7 +15,7 @@ class DeviceRegressionDetector:
             lags (int): Number of lagged features to use for predictions.
             threshold (float): Difference threshold for raising alerts.
         """
-        self.csv_path = 'pipelines/iot_network_intrusion_dataset_model.csv'
+        self.csv_path = '/data/iot_network_intrusion_dataset_model.csv'
         self.lags = lags
         self.threshold = threshold
         self.models = {}  # Dictionary to store models for each device
