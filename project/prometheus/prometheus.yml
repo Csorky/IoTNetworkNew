@@ -8,12 +8,14 @@
 #        labels:
 #          alias: "pyspark_streaming"
       
+# scrape_configs:
+#   - job_name: 'pyspark_custom_metrics'
+#     static_configs:
+#       - targets: ['pyspark_streaming:7000']  # Use the service name and port
+
 scrape_configs:
   - job_name: 'pyspark_custom_metrics'
     scrape_interval: 1s  # Set scrape interval to 1 second
     static_configs:
-      # - targets: ['pyspark_streaming:7000']  # Use the service name and port
       - targets: ['pyspark_streaming:7000']  # Use the service name and port
 
-      
-      
