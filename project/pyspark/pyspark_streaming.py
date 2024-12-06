@@ -66,7 +66,7 @@ prediction_difference_gauge = Gauge(
 
 # Start Prometheus metrics server
 def start_prometheus_server():
-    threading.Thread(target=start_http_server, args=(7001,), daemon=True).start()
+    threading.Thread(target=start_http_server, args=(7000,), daemon=True).start()
     print("Prometheus server started on port 7000")
 
 def main():
