@@ -110,14 +110,21 @@ services:
     # depends_on:
     #   - influxdb
 
-  model:
+  modeling:
     build:
-      context: ./model
-    container_name: model
+      context: ./modeling
+    container_name: modeling
     depends_on:
       - influxdb
     volumes:
-      - ./model:/app
+      - ./modeling:/app
+      - ./data:/data
+    environment:
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=qenhpUMJyt_fIzacORn4M_0yTUDQqNJByLxwEJPVn0gZlyhcYphnn4zV59gY6og7oT3ASLynkcAjlJOmoE-zMQ==
+      - INFLUXDB_ORG=your_org
+      - INFLUXDB_BUCKET=iot_data
+    command: ["python", "main.py"]
 
   kafka_manager:
     image: hlebalbau/kafka-manager:stable
