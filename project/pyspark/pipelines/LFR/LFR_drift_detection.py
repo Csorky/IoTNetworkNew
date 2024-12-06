@@ -6,6 +6,7 @@ from scipy.stats import ks_2samp
 
 class LFRDriftDetector:
     # Define shared metrics with labels
+    # Define shared metrics with labels
     metrics = {
         "drift_state": Gauge(
             "lfr_drift_state",
@@ -17,27 +18,33 @@ class LFRDriftDetector:
             "Number of drift events detected",
             ["variable_name", "ip"],
         ),
-        "true_positive_rate": Gauge(
-            "lfr_true_positive_rate",
-            "True Positive Rate for LFR",
+        "rolling_mean": Gauge(
+            "lfr_rolling_mean",
+            "Rolling window mean of the monitored variable",
             ["variable_name", "ip"],
         ),
-        "false_positive_rate": Gauge(
-            "lfr_false_positive_rate",
-            "False Positive Rate for LFR",
+        "rolling_std_dev": Gauge(
+            "lfr_rolling_std_dev",
+            "Rolling window standard deviation of the monitored variable",
             ["variable_name", "ip"],
         ),
-        "false_negative_rate": Gauge(
-            "lfr_false_negative_rate",
-            "False Negative Rate for LFR",
+        "max_z_score": Gauge(
+            "lfr_max_z_score",
+            "Maximum Z-score for the current data batch",
             ["variable_name", "ip"],
         ),
-        "true_negative_rate": Gauge(
-            "lfr_true_negative_rate",
-            "True Negative Rate for LFR",
+        "avg_z_score": Gauge(
+            "lfr_avg_z_score",
+            "Average Z-score for the current data batch",
+            ["variable_name", "ip"],
+        ),
+        "min_p_value": Gauge(
+            "lfr_min_p_value",
+            "Minimum p-value from KS-test in the current data batch",
             ["variable_name", "ip"],
         ),
     }
+
 
     def __init__(self, variable_name, ip, threshold=0.1, window_size=50):
         """
@@ -65,6 +72,7 @@ class LFRDriftDetector:
             "tn": 0,
         }
 
+
     def update(self, data):
         """
         Update the detector with new data points.
@@ -89,6 +97,7 @@ class LFRDriftDetector:
         self._update_rates(predictions, ground_truth)
         self._update_prometheus_metrics()
 
+
     def _update_baseline(self):
 
         alpha = 0.1  # Smoothing factor for EMA
@@ -105,28 +114,54 @@ class LFRDriftDetector:
             self.baseline_mean = alpha * current_mean + (1 - alpha) * self.baseline_mean
             self.baseline_std = alpha * current_std + (1 - alpha) * self.baseline_std
 
+        self.metrics["rolling_mean"].labels(variable_name=self.variable_name, ip=self.ip).set(self.baseline_mean)
+        self.metrics["rolling_std_dev"].labels(variable_name=self.variable_name, ip=self.ip).set(self.baseline_std)
+
+
+    def _batch_ks_test(self, new_data_batch, baseline_window):
+        _, p_value = ks_2samp(new_data_batch, baseline_window)
+        return p_value
+        
+
     def _generate_predictions(self, data):
         
         predictions = []
         ground_truth = []
+        z_scores = []
+        p_values = []
+
+        batch_size = 10  # Number of points per batch
+        num_batches = len(data) // batch_size
 
         # Statistical test thresholds
-        z_threshold = 3  # Z-score threshold (corresponds to ~99.7% confidence)
-        ks_p_value_threshold = 0.05  # p-value threshold for KS test
+        z_threshold = 2.56  # Z-score threshold
+        ks_p_value_threshold = 0.1  # p-value threshold for KS test
 
-        for x in data:
-            # Z-Score Test: Drift detected if |Z| > threshold
-            z_score = abs((x - self.baseline_mean) / self.baseline_std)
-            prediction = 1 if z_score > z_threshold else 0
+        for i in range(num_batches):
+            batch = data[i * batch_size: (i + 1) * batch_size]
+            
+            # KS Test: Compare batch to baseline window
+            ks_p_value = self._batch_ks_test(batch, self.data_window)
+            prediction = 1 if ks_p_value < ks_p_value_threshold else 0  # Drift if p-value < threshold
 
-            # KS Test: Compare new point distribution with baseline
-            _, ks_p_value = ks_2samp([x], self.data_window)
-            ground_truth_value = 1 if ks_p_value < ks_p_value_threshold else 0
+            # Z-Score Test for individual values
+            z_scores_batch = [(x - self.baseline_mean) / self.baseline_std for x in batch]
+            max_z_score = max(abs(z) for z in z_scores_batch)
+            z_score_flag = 1 if max_z_score > z_threshold else 0
 
+            # Aggregate results
             predictions.append(prediction)
-            ground_truth.append(ground_truth_value)
+            ground_truth.append(z_score_flag)
+            z_scores.append(max_z_score)
+            p_values.append(ks_p_value)
+
+        self.metrics["max_z_score"].labels(variable_name=self.variable_name, ip=self.ip).set(max(z_scores))
+        self.metrics["avg_z_score"].labels(variable_name=self.variable_name, ip=self.ip).set(sum(z_scores) / len(z_scores))
+        self.metrics["min_p_value"].labels(variable_name=self.variable_name, ip=self.ip).set(min(p_values))
 
         return predictions, ground_truth
+    
+
     def _update_rates(self, predictions, ground_truth):
 
         tp = sum(p == 1 and gt == 1 for p, gt in zip(predictions, ground_truth))
@@ -148,10 +183,7 @@ class LFRDriftDetector:
 
             self.metrics["drift_events"].labels(variable_name=self.variable_name, ip=self.ip).inc()
 
+
     def _update_prometheus_metrics(self):
 
-        self.metrics["true_positive_rate"].labels(variable_name=self.variable_name, ip=self.ip).set(self.rates["tp"])
-        self.metrics["false_positive_rate"].labels(variable_name=self.variable_name, ip=self.ip).set(self.rates["fp"])
-        self.metrics["false_negative_rate"].labels(variable_name=self.variable_name, ip=self.ip).set(self.rates["fn"])
-        self.metrics["true_negative_rate"].labels(variable_name=self.variable_name, ip=self.ip).set(self.rates["tn"])
         self.metrics["drift_state"].labels(variable_name=self.variable_name, ip=self.ip).set(int(self.drift_detected))
