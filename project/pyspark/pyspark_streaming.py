@@ -22,6 +22,10 @@ from pipelines.cusum_change_detector import CusumDriftDetector
 from pipelines.ddm_drift_detection import DeviceDDMDetector
 from pyspark.sql.functions import from_json, col, min as spark_min, max as spark_max, mean as spark_mean
 
+from pipelines.LFR.LFR_drift_detection import LFRDriftDetector
+
+
+
 # Initialize Spark Session
 def initialize_spark():
     spark = SparkSession.builder \
@@ -132,7 +136,10 @@ def main():
         StructField("Label", StringType(), True),
         StructField("Cat", StringType(), True),
         StructField("Sub_Cat", StringType(), True),
-        StructField("Timestamp", StringType(), True)
+        StructField("Timestamp", StringType(), True),
+        StructField("Flow_Byts/s", FloatType(), True),
+        StructField("Flow_Pkts/s", FloatType(), True),
+        StructField("Bwd_Pkt_Len_Max", FloatType(), True)
     ])
 
     # maxOffsetsPerTrigger limits the number of records read from Kafka in each micro-batch.
@@ -158,6 +165,15 @@ def main():
     device_ips = ['192.168.0.13', '192.168.0.24', '192.168.0.16']
     device_cusum_detectors = {ip: CusumDriftDetector(window_size=10, threshold=15, delta=0.005) for ip in device_ips}
     device_ddm_detectors = {ip: DeviceDDMDetector() for ip in device_ips}
+
+    # LFR init----------------------------------------------------------------------------------------------------------------------------------------------------
+    variables_lfr = ["Bwd_Pkt_Len_Max"]
+    lfr_detectors = {
+        (var, ip): LFRDriftDetector(variable_name=var, ip=ip, threshold=0.05)
+        for var in variables_lfr
+        for ip in device_ips
+    }
+    # LFR init----------------------------------------------------------------------------------------------------------------------------------------------------
     
      # Initialize drift detectors for each device
     device_ph_detectors = DevicePageHinkleyDetector(delta=0.01, threshold=5, burn_in=30)
@@ -508,6 +524,23 @@ def main():
             if margin_density is not None:
                 md3_margin_density_gauge.labels(src_ip=ip).set(margin_density)
             #MD3---------------------------------------------------------------------------------------------------------------------------------------------
+
+        # LFR------------------------------------------------------------------------------------------------------------------------------------------------
+        for (var, ip), detector in lfr_detectors.items():
+            # Filter data for the specific IP
+            device_df = batch_df.filter(col("Src_IP") == ip)
+            if device_df.rdd.isEmpty():
+                continue
+
+            # Extract data for the specific variable
+            lfr_data = device_df.select(var).toPandas()[var].tolist()
+
+            if not lfr_data:
+                continue
+
+            # Update the LFR detector with new data
+            detector.update(lfr_data)
+        # LFR--------------------------------------------------------------------------------------------------------------------------------------------------
 
         end_time = time.time()
         latency = end_time - start_time
