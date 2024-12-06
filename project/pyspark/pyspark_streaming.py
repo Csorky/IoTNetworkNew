@@ -1,4 +1,3 @@
-# pyspark/pyspark_streaming.py
 
 from prometheus_client import start_http_server, Counter, Gauge
 from pyspark.sql import SparkSession
@@ -28,6 +27,7 @@ flow_id_counter = Counter('flow_id_count', 'Number of processed Flow IDs', ['flo
 flow_duration_gauge = Gauge('flow_duration', 'Flow duration for each source IP', ['src_ip'])
 processed_records = Counter('processed_records_total', 'Total number of records processed')
 processing_latency = Gauge('processing_latency', 'Latency in processing records')
+
 ### ENES METRIC DEFINE START
 window_avg_flow_duration_gauge = Gauge('window_avg_flow_duration','Average flow duration for the sliding window')
 window_event_count_gauge = Gauge('window_event_count','Number of events in the sliding window')
@@ -39,36 +39,6 @@ device_anomaly_counter = Counter('device_kdq_tree_anomalies','Number of anomalie
 def start_prometheus_server():
     threading.Thread(target=start_http_server, args=(7000,), daemon=True).start()
     print("Prometheus server started on port 7000")
-
-# Device-specific Drift Detectors
-class DeviceDriftDetectors:
-    def __init__(self, window_size=10, threshold=5, delta=0.005):
-        
-        # Initialize univariate detector for CUSUM
-        self.cusum = CUSUM(
-            target=None,      # Let CUSUM estimate target from initial data
-            sd_hat=None,      # Let CUSUM estimate standard deviation from initial data
-            burn_in=window_size,  # Number of initial data points to establish baseline
-            delta=delta,      # Sensitivity to changes
-            threshold=threshold,  # Threshold for drift detection
-            direction=None    # Monitor both increases and decreases
-        )
-    
-
-    def update_drift(self, data_univariate, data_multivariate):
-        
-        for value in data_univariate:
-            self.cusum.update(value)
-        
-    def check_drift(self):
-        
-        drift_events = []
-        if self.cusum.drift_state == 'drift':
-            drift_events.append('CUSUM Drift detected')
-        else:
-            print("no drift")
-
-        return drift_events
 
 def main():
     spark = initialize_spark()
@@ -116,7 +86,6 @@ def main():
     ### ENES VAR DEFINE START
     device_kdq_trees = {ip: KDQTree(threshold=0.1) for ip in device_ips}
     device_kdq_trees = {}
-    device_detectors = {ip: DeviceDriftDetectors(window_size=10, threshold=5, delta=0.005) for ip in device_ips}  # window_size=10
     ### ENES VAR DEFINE END
 
     def record_metrics(batch_df, epoch_id):
@@ -169,12 +138,13 @@ def main():
             if anomalies: # Print and log anomalies
                 print(f"Anomalies detected for device {ip}: {anomalies}")
                 device_anomaly_counter.labels(src_ip=ip).inc(len(anomalies))
-            ### Enes KDQ END    
+              
 
             avg_flow_duration = device_df.agg(F.avg("Flow_Duration").alias("avg_flow_duration")).collect()[0]["avg_flow_duration"]
             if avg_flow_duration is None:
                 continue 
-
+            ### Enes KDQ END  
+                
             ### Enes EMA START        
             current_ema = ema_calculator.calculate_ema(avg_flow_duration, ip) 
             print(f"Device: {ip}, EMA Flow Duration: {current_ema}") # Print and update Prometheus with the EMA
@@ -187,20 +157,6 @@ def main():
             print(device_data)
 
             ### Enes EMA END
-
-            # Extract features
-            data_univariate = device_data['Idle_Min'].values.tolist()  # list of 10 Idle_Min values
-            print(data_univariate)
-
-            # Update drift detectors
-            device_detectors[ip].update_drift(data_univariate, None)  # Pass None for multivariate
-
-            # Check for drift events
-            drift_events = device_detectors[ip].check_drift()
-            print("drift_events")
-            print(drift_events)
-            for event in drift_events:
-                print(f"Device {ip}: {event} at epoch {epoch_id}")
 
     # Start the streaming query with foreachBatch and trigger settings
     query = df_parsed.writeStream \
