@@ -155,14 +155,6 @@ def main():
             print(f"  - Detected Drifts: {metrics['detected_drifts']}")
             print(f"  - Detected Warnings: {metrics['detected_warnings']}")
 
-    # Initialize dictionaries to store training data per device
-    device_md3_training_data = {ip: [] for ip in device_ips}
-    required_training_samples = 100  # Number of samples needed to initialize the detector
-
-    # Dictionaries for tracking per-device global min and max
-    global global_flow_duration_min, global_flow_duration_max
-    global_flow_duration_min = {ip: float("inf") for ip in device_ips}
-    global_flow_duration_max = {ip: float("-inf") for ip in device_ips}
 
     def record_metrics(batch_df, epoch_id):
         global global_flow_duration_min
