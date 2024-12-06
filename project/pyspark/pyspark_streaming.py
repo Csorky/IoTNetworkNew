@@ -169,7 +169,7 @@ def main():
     # LFR init----------------------------------------------------------------------------------------------------------------------------------------------------
     variables_lfr = ["Bwd_Pkt_Len_Max"]
     lfr_detectors = {
-        (var, ip): LFRDriftDetector(variable_name=var, ip=ip, threshold=0.05)
+        (var, ip): LFRDriftDetector(variable_name=var, ip=ip, threshold=0.05, window_size=80)
         for var in variables_lfr
         for ip in device_ips
     }
