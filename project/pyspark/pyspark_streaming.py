@@ -7,9 +7,9 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import *
 import threading
 from menelaus.change_detection import CUSUM  # Import only necessary classes
-from pipeline_stat.sliding_window import process_device_metrics, sliding_window_aggregation
-from pipeline_stat.ema import ExponentialMovingAverage
-from pipeline_kdq.kdq_tree import KDQTree
+from pipelines.sliding_window import process_device_metrics, sliding_window_aggregation
+from pipelines.ema import ExponentialMovingAverage
+from pipelines.kdq_tree import KDQTree
 
 # Initialize Spark Session
 def initialize_spark():
