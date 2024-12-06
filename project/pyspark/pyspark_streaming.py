@@ -5,8 +5,12 @@ from pipelines.pca_cd_detector import *
 from pipelines.md3_detector import *
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import from_json, col
+from pyspark.sql import functions as F
 from pyspark.sql.types import *
 import threading
+from pipelines.sliding_window import process_device_metrics, sliding_window_aggregation
+from pipelines.ema import ExponentialMovingAverage
+from pipelines.kdq_tree import KDQTree
 from pipelines.pagehinley import DevicePageHinkleyDetector
 from pipelines.adwin import DeviceADWINDetector
 from pipelines.regression import DeviceRegressionDetector
@@ -32,8 +36,16 @@ def initialize_spark():
 # Define Prometheus metrics
 src_ip_counter = Counter('src_ip_count', 'Number of occurrences of each source IP', ['src_ip'])
 flow_id_counter = Counter('flow_id_count', 'Number of processed Flow IDs', ['flow_id'])
+flow_duration_gauge = Gauge('flow_duration', 'Flow duration for each source IP', ['src_ip'])
 processed_records = Counter('processed_records_total', 'Total number of records processed')
 processing_latency = Gauge('processing_latency', 'Latency in processing records')
+
+### ENES METRIC DEFINE START
+window_avg_flow_duration_gauge = Gauge('window_avg_flow_duration','Average flow duration for the sliding window')
+window_event_count_gauge = Gauge('window_event_count','Number of events in the sliding window')
+ema_flow_duration_gauge = Gauge('ema_flow_duration', 'Exponential Moving Average of flow duration for each source IP', ['src_ip'])
+device_anomaly_counter = Counter('device_kdq_tree_anomalies','Number of anomalies detected by kdq-Tree for each device',['src_ip'])
+### ENES METRIC DEFINE END
 
 # Page-Hinkley metrics
 ph_drift_detected_counter = Counter('ph_drift_detected_count', '', ['src_ip'])
@@ -104,6 +116,7 @@ def main():
         StructField("Flow_ID", StringType(), True),
         StructField("Src_IP", StringType(), True),
         StructField("Src_Port", IntegerType(), True),
+        StructField("Flow_Duration", IntegerType(), True), ### Enes import
         StructField("Dst_IP", StringType(), True),
         StructField("Dst_Port", IntegerType(), True),
         StructField("Protocol", StringType(), True),
@@ -137,6 +150,12 @@ def main():
 
     start_prometheus_server()
 
+    ### ENES EMA VAR START
+    global ema_calculator  # Make it accessible in `record_metrics`
+    ema_calculator = ExponentialMovingAverage(alpha=0.1)
+    ### ENES EMA VAR END
+
+    # Define device IPs (known IPs for each device)
     device_ips = ['192.168.0.13', '192.168.0.24', '192.168.0.16']
     device_cusum_detectors = {ip: CusumDriftDetector(window_size=10, threshold=15, delta=0.005) for ip in device_ips}
     device_ddm_detectors = {ip: DeviceDDMDetector() for ip in device_ips}
@@ -204,6 +223,10 @@ def main():
             print(f"  - Detected Drifts: {metrics['detected_drifts']}")
             print(f"  - Detected Warnings: {metrics['detected_warnings']}")
 
+    ### ENES VAR DEFINE START
+    device_kdq_trees = {ip: KDQTree(threshold=0.1) for ip in device_ips}
+    device_kdq_trees = {}
+    ### ENES VAR DEFINE END
 
     def record_metrics(batch_df, epoch_id):
         global global_flow_duration_min
@@ -217,6 +240,18 @@ def main():
         start_time = time.time()
         record_count = batch_df.count()
         processed_records.inc(record_count)
+
+        ### ENES WINDOW START
+        sliding_window_df = sliding_window_aggregation(batch_df, window_size="10 minutes", slide_duration="5 minutes")
+        windowed_metrics = sliding_window_df.collect()
+
+        for row in windowed_metrics:
+            print(f"Window: {row['window']}, Avg Flow Duration: {row['avg_flow_duration']}, Event Count: {row['event_count']}")
+            if row['avg_flow_duration'] is not None:  # Update Prometheus metrics
+                window_avg_flow_duration_gauge.set(row['avg_flow_duration'])
+
+        window_event_count_gauge.set(row['event_count'])
+        ### ENES WINDOW END
 
         # Simple statistics part: min, max, mean <- Flow Duration
         for ip in device_ips:
@@ -282,11 +317,41 @@ def main():
             device_df = batch_df.filter(col("Src_IP") == ip)
             if device_df.rdd.isEmpty():
                 continue
+
+            ### Enes KDQ START------------------------------------------------------------------------------------------------------------------------------------------------------       
+            if ip not in device_kdq_trees: # Ensure the kdq-Tree exists for the device
+                print(f"Warning: Device {ip} not found in device_kdq_trees. Initializing a new kdq-Tree.")
+                device_kdq_trees[ip] = KDQTree(threshold=0.1)
+          
+            features_df = device_df.select("Flow_Duration", "Idle_Min", "Src_Port").toPandas().values # Extract features for the kdq-Tree (only the relevant columns for anomaly detection)
+            anomalies = device_kdq_trees[ip].detect_anomalies(features_df, k=10)
+ 
+            if anomalies: # Print and log anomalies
+                print(f"Anomalies detected for device {ip}: {anomalies}")
+                device_anomaly_counter.labels(src_ip=ip).inc(len(anomalies))
+              
+
+            avg_flow_duration = device_df.agg(F.avg("Flow_Duration").alias("avg_flow_duration")).collect()[0]["avg_flow_duration"]
+            if avg_flow_duration is None:
+                continue 
+            ### Enes KDQ END------------------------------------------------------------------------------------------------------------------------------------------------------
+            
                 
+            ### Enes EMA START------------------------------------------------------------------------------------------------------------------------------------------------------        
+            current_ema = ema_calculator.calculate_ema(avg_flow_duration, ip) 
+            print(f"Device: {ip}, EMA Flow Duration: {current_ema}") # Print and update Prometheus with the EMA
+            ema_flow_duration_gauge.labels(src_ip=ip).set(current_ema)               
+            device_data = process_device_metrics(device_df, ip, flow_duration_gauge) # Flow duration
+            
+            if device_data.empty:
+                continue
+            ### Enes EMA END------------------------------------------------------------------------------------------------------------------------------------------------------
+  
             # Collect the data for the device
             device_data = device_df.select("Idle_Min", "Src_IP").toPandas()
             if device_data.empty:
                 continue
+            
 
             # Update PageHinkley drift detectors
             idle_min_values = device_data['Idle_Min'].values.tolist()
@@ -423,7 +488,6 @@ def main():
 
             #MD3---------------------------------------------------------------------------------------------------------------------------------------------
             # MD3 Detector Update
-
             if device_data.empty:
                 continue
 

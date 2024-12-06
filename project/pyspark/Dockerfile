@@ -3,22 +3,23 @@ FROM bitnami/spark:3.4.0
 
 WORKDIR /app
 
-# Install system dependencies (including libgomp for LightGBM)
 USER root
 RUN apt-get update && apt-get install -y libgomp1 && rm -rf /var/lib/apt/lists/*
 
-# Copy the PySpark application
 COPY pyspark_streaming.py /app/
+COPY pipelines/sliding_window.py /app/pipelines/
+COPY pipelines/ema.py /app/pipelines/
+COPY pipelines/kdq_tree.py /app/pipelines/
 
 # Copy the JMX Prometheus Java agent and the exporter configuration
-COPY jmx_prometheus_javaagent-1.0.1.jar /opt/bitnami/spark/jars/
-COPY spark-jmx-exporter.yml /opt/bitnami/spark/jars/
-COPY metrics.properties /opt/bitnami/spark/conf/
+COPY prometheus_metrics/jmx_prometheus_javaagent-1.0.1.jar /opt/bitnami/spark/jars/
+COPY prometheus_metrics/spark-jmx-exporter.yml /opt/bitnami/spark/jars/
+COPY prometheus_metrics/metrics.properties /opt/bitnami/spark/conf/
 
 # Set environment variables for Spark and Python
 ENV SPARK_HOME=/opt/bitnami/spark
 ENV PATH=$SPARK_HOME/bin:$PATH
-ENV PYTHONPATH=$SPARK_HOME/python/:$PYTHONPATH
+ENV PYTHONPATH=$SPARK_HOME/python/:$PYTHONPATH:/app 
 ENV PYSPARK_PYTHON=python3
 
 # Install necessary Python libraries including Menelaus, prometheus-client, and LightGBM
