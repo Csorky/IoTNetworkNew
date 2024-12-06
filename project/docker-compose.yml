@@ -60,6 +60,7 @@ services:
       - "8000:8000" # Original JMX port
       - "7000:7000" # Add this for the Python Prometheus client
 
+
   prometheus:
     image: prom/prometheus:latest
     container_name: prometheus

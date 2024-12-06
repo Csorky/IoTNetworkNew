@@ -7,6 +7,9 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import from_json, col
 from pyspark.sql.types import *
 import threading
+from pipelines.pagehinley import DevicePageHinkleyDetector
+from pipelines.adwin import DeviceADWINDetector
+from pipelines.regression import DeviceRegressionDetector
 import time
 import statistics
 import pandas as pd
@@ -26,11 +29,46 @@ def initialize_spark():
         .getOrCreate()
     return spark
 
-# Define Prometheus metrics
-src_ip_counter = Counter('src_ip_count', 'Number of occurrences of each source IP', ['src_ip'])
-flow_id_counter = Counter('flow_id_count', 'Number of processed Flow IDs', ['flow_id'])
-processed_records = Counter('processed_records_total', 'Total number of records processed')
-processing_latency = Gauge('processing_latency', 'Latency in processing records')
+# Page-Hinkley metrics
+ph_drift_detected_counter = Counter('ph_drift_detected_count', '', ['src_ip'])
+ph_monitored_value_gauge = Gauge(
+    "ph_monitored_value",
+    "Monitored variable value for Page-Hinkley detection",
+    ['src_ip']
+)
+ph_drift_detected_gauge = Gauge(
+    "ph_drift_detected",
+    "Drift detection status for Page-Hinkley (1: drift detected, 0: no drift)",
+    ['src_ip']
+)
+ph_drift_window_start_gauge = Gauge(
+    "ph_drift_window_start",
+    "Start index of detected drift window",
+    ['src_ip']
+)
+ph_drift_window_end_gauge = Gauge(
+    "ph_drift_window_end",
+    "End index of detected drift window",
+    ['src_ip']
+)
+
+# ADWIN metrics
+adwin_monitored_value_gauge = Gauge("adwin_monitored_value", "Monitored variable value for ADWIN detection", ['src_ip'])
+adwin_drift_detected_gauge = Gauge("adwin_drift_detected", "Drift detection status for ADWIN (1: drift detected, 0: no drift)", ['src_ip'])
+adwin_mean_gauge = Gauge("adwin_mean", "Mean value for ADWIN detection during drift", ['src_ip'])
+
+# Prometheus metrics for regression
+prediction_difference_counter = Counter(
+    "prediction_difference_alerts", 
+    "Number of alerts due to significant prediction differences", 
+    ['src_ip']
+)
+
+prediction_difference_gauge = Gauge(
+    "prediction_difference_value", 
+    "Magnitude of prediction difference", 
+    ['src_ip']
+)
 
 # CUSUM metrics
 idle_min_gauge = Gauge('idle_min', 'Idle time in minutes for each source IP', ['src_ip'])
@@ -96,6 +134,11 @@ def main():
     device_ips = ['192.168.0.13', '192.168.0.24', '192.168.0.16']
     device_cusum_detectors = {ip: CusumDriftDetector(window_size=10, threshold=15, delta=0.005) for ip in device_ips}
     device_ddm_detectors = {ip: DeviceDDMDetector() for ip in device_ips}
+    
+     # Initialize drift detectors for each device
+    device_ph_detectors = DevicePageHinkleyDetector(delta=0.01, threshold=5, burn_in=30)
+    device_adwin_detectors = DeviceADWINDetector(delta=0.1)
+    streaming_detector = DeviceRegressionDetector()
     
      #Initialize PCA detectors
     device_pca_cd_detectors = {ip: DevicePCACDDetectors(window_size=100) for ip in device_ips}
@@ -163,6 +206,7 @@ def main():
 
         if batch_df.rdd.isEmpty():
             return
+
 
         start_time = time.time()
         record_count = batch_df.count()
@@ -234,12 +278,56 @@ def main():
                 continue
                 
             # Collect the data for the device
+            device_data = device_df.select("Idle_Min", "Src_IP").toPandas()
+            if device_data.empty:
+                continue
+
+            # Update PageHinkley drift detectors
+            idle_min_values = device_data['Idle_Min'].values.tolist()
+
+            #PH START------------------------------------------------------------------------------------------------------------------------------------------------------
+            drift_events = device_ph_detectors.update_drift(ip, idle_min_values)
+
+            # Update Prometheus metrics for the monitored variable
+            for idx, value in enumerate(idle_min_values):
+                ph_monitored_value_gauge.labels(src_ip=ip).set(value)
+
+            # Track drift events and update Prometheus
+            for event in drift_events:
+                print(f"PageHinkley Drift detected for Device {ip}: {event}")
+                ph_drift_detected_gauge.labels(src_ip=ip).set(1)  # Mark drift detected
+                ph_drift_detected_counter.labels(src_ip=ip).inc(1)  # Mark drift detected
+                ph_drift_window_start_gauge.labels(src_ip=ip).set(idx)  # Start of drift window
+                ph_drift_window_end_gauge.labels(src_ip=ip).set(idx)    # End of drift window
+
+            # Reset drift detection status for the next batch
+            ph_drift_detected_gauge.labels(src_ip=ip).set(0)
+            #PH END----------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+            # ADWIN detection----------------------------------------------------------------------------------------------------------------------------------------------------------------
+            adwin_drift_events = device_adwin_detectors.update_drift(ip, idle_min_values)
+            for value in idle_min_values:
+                adwin_monitored_value_gauge.labels(src_ip=ip).set(value)
+
+            for event in adwin_drift_events:
+                if event['state'] == 'drift':
+                    print(f"ADWIN Drift detected for Device {ip}: {event}")
+                    adwin_drift_detected_gauge.labels(src_ip=ip).set(1)
+                    adwin_mean_gauge.labels(src_ip=ip).set(event["mean"])
+
+            adwin_drift_detected_gauge.labels(src_ip=ip).set(0)
+            # ADWIN detection end----------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+            # Update StreamingChangeDetector and compare predictions----------------------------------------------------------------------------------------------------------------------------------------------------------------
+            predictions = streaming_detector.update_and_predict(ip, [sum(idle_min_values) / 10])
+            streaming_detector.compare_predictions(ip, [sum(idle_min_values) / 10], predictions)
+            #----------------------------------------------------------------------------------------------------------------------------------------------------------------
             device_data = device_df.select("Idle_Min", "Src_IP","Flow_Duration", "Tot_Fwd_Pkts", "Tot_Bwd_Pkts", "Label").toPandas()
             if device_data.empty:
                 continue
             print(device_data)
 
-            # CUSUM record metrics
+            # CUSUM record metrics----------------------------------------------------------------------------------------------------------------------------------------------------------------
             data_univariate = device_data['Idle_Min'].values.tolist() 
             print(data_univariate)
             # for cusum visualization
@@ -256,8 +344,8 @@ def main():
             print(drift_events)
             for event in drift_events:
                 print(f"CUSUM: Device {ip}: {event} at epoch {epoch_id}")
-
-           # Make predictions and update DDM
+            #----------------------------------------------------------------------------------------------------------------------------------------------------------------
+           # Make predictions and update DDM----------------------------------------------------------------------------------------------------------------------------------------------------------------
             X_test = device_data[["Flow_Duration", "Tot_Fwd_Pkts", "Tot_Bwd_Pkts"]].values
             y_true = device_data["Label"].values
             correct_predictions = 0
@@ -286,6 +374,7 @@ def main():
 
              # Log accuracy to Prometheus
             flow_duration_gauge.labels(src_ip=f"{ip}_accuracy").set(batch_accuracy)
+            #----------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 
             device_data = device_df.select(

@@ -81,7 +81,7 @@ def stream_filtered_data():
     try:
         df_filtered = pd.read_csv('/data/iot_network_intrusion_dataset_stream.csv')
     except FileNotFoundError:
-        print("Filtered dataset file not found. Ensure the CSV is available at /data/iot_network_intrusion_dataset.csv")
+        print("Filtered dataset file not found. Ensure the CSV is available at /data/iot_network_intrusion_dataset_stream.csv")
         sys.exit(1)
 
     producer_filtered = create_producer()
