@@ -86,7 +86,7 @@ def stream_filtered_data():
 
     producer_filtered = create_producer()
     try:
-        stream_data(df_filtered, producer_filtered, topic='iot_topic', batch_size=100, delay=1)  # Slower rate
+        stream_data(df_filtered, producer_filtered, topic='iot_topic', batch_size=120, delay=1)  # Slower rate
     finally:
         producer_filtered.flush()
         producer_filtered.close()

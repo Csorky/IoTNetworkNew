@@ -1,5 +1,5 @@
 # pyspark/pyspark_streaming.py
-
+import os
 from prometheus_client import start_http_server, Counter, Gauge
 from pipelines.pca_cd_detector import *
 from pipelines.md3_detector import *
@@ -10,7 +10,9 @@ import threading
 import time
 import statistics
 import pandas as pd
-
+import numpy as np
+from pipelines.cusum_change_detector import CusumDriftDetector
+from pipelines.ddm_drift_detection import DeviceDDMDetector
 from pyspark.sql.functions import from_json, col, min as spark_min, max as spark_max, mean as spark_mean
 
 # Initialize Spark Session
@@ -82,7 +84,7 @@ def main():
         .format("kafka") \
         .option("kafka.bootstrap.servers", "kafka:9092") \
         .option("subscribe", "iot_topic") \
-        .option("maxOffsetsPerTrigger", 300) \
+        .option("maxOffsetsPerTrigger", 120) \
         .load()
 
     df_parsed = df.selectExpr("CAST(value AS STRING)") \
@@ -92,8 +94,10 @@ def main():
     start_prometheus_server()
 
     device_ips = ['192.168.0.13', '192.168.0.24', '192.168.0.16']
-
-    #Initialize PCA detectors
+    device_cusum_detectors = {ip: CusumDriftDetector(window_size=10, threshold=15, delta=0.005) for ip in device_ips}
+    device_ddm_detectors = {ip: DeviceDDMDetector() for ip in device_ips}
+    
+     #Initialize PCA detectors
     device_pca_cd_detectors = {ip: DevicePCACDDetectors(window_size=100) for ip in device_ips}
 
     # Initialize MD3 detectors
@@ -110,6 +114,47 @@ def main():
         except ValueError as e:
             print(f"Could not initialize MD3 detector for device {ip}: {e}")
 
+
+
+    training_data = pd.read_csv(training_data_path)
+
+    
+    #DDM
+    # Train initial models
+    for ip in device_ips:
+        device_data_ddm = training_data[training_data['Src_IP'] == ip]
+        if not device_data_ddm.empty:
+            # ADD MORE FEATURES 
+            X_train = device_data_ddm[["Flow_Duration", "Tot_Fwd_Pkts", "Tot_Bwd_Pkts"]].values
+            y_train = device_data_ddm["Label"].values
+            device_ddm_detectors[ip].fit_initial_model(X_train, y_train)
+            print(f"Initial model trained for device {ip}")
+        else:
+            print(f"No initial data available for device {ip}.")
+
+
+    # Dictionaries for tracking per-device global min and max (STATS)
+    global global_flow_duration_min, global_flow_duration_max
+    global_flow_duration_min = {ip: float("inf") for ip in device_ips}
+    global_flow_duration_max = {ip: float("-inf") for ip in device_ips}
+
+    global  evaluation_metrics
+    evaluation_metrics = {ip: {"accuracy": [], "detected_drifts": 0, "detected_warnings": 0} for ip in device_ips}
+
+    # buffer for training data
+    # device_training_buffers = {ip: {'X': [], 'y': []} for ip in device_ips}
+
+    # Initialize global dictionaries to track metrics
+    evaluation_metrics = {ip: {"accuracy": [], "detected_drifts": 0, "detected_warnings": 0} for ip in device_ips}
+
+    def report_metrics():
+        for ip, metrics in evaluation_metrics.items():
+            avg_accuracy = np.mean(metrics["accuracy"]) if metrics["accuracy"] else 0
+            print(f"Device {ip}:")
+            print(f"  - Average Accuracy: {avg_accuracy:.2f}")
+            print(f"  - Detected Drifts: {metrics['detected_drifts']}")
+            print(f"  - Detected Warnings: {metrics['detected_warnings']}")
+
     # Initialize dictionaries to store training data per device
     device_md3_training_data = {ip: [] for ip in device_ips}
     required_training_samples = 100  # Number of samples needed to initialize the detector
@@ -119,32 +164,11 @@ def main():
     global_flow_duration_min = {ip: float("inf") for ip in device_ips}
     global_flow_duration_max = {ip: float("-inf") for ip in device_ips}
 
-    
-    #  # Initial training phase
-    # print("Collecting data for initial training...")
-    # training_data = df_parsed.filter(df_parsed.Label.isNotNull()).toPandas()
-
-    # if not training_data.empty:
-    #     for ip in device_ips:
-    #         device_data = training_data[training_data["Src_IP"] == ip]
-    #         if device_data.empty:
-    #             continue
-
-    #         # Extract training features and labels
-    #         X_train = device_data[["Flow_Duration", "Tot_Fwd_Pkts", "Tot_Bwd_Pkts"]].values
-    #         y_train = device_data["Label"].values
-
-    #         # Train model for each device
-    #         if not device_ddm_detectors[ip].trained:
-    #             device_ddm_detectors[ip].fit_initial_model(X_train, y_train)
-    #             print(f"Initial model trained for device {ip}")
-
-
-
     def record_metrics(batch_df, epoch_id):
         global global_flow_duration_min
         global global_flow_duration_max
-        print("Inside record_metrics - Global Flow_Duration:", global_flow_duration_min)
+        global evaluation_metrics
+
         if batch_df.rdd.isEmpty():
             return
 
@@ -168,11 +192,26 @@ def main():
             print(f"Device {ip} - Flow_Duration: Min={device_agg_metrics['Flow_Duration_Min']}, "
                   f"Max={device_agg_metrics['Flow_Duration_Max']}, Mean={device_agg_metrics['Flow_Duration_Mean']:.2f}")
 
+
+            # Collect the data for the device
+            device_data = device_df.select("Flow_Duration", "Src_IP").toPandas()
+            if device_data.empty:
+                continue
+            print(device_data)
+
+            # Flow_duration gauge
+            data_univariate = device_data['Flow_Duration'].values.tolist() 
+            print(data_univariate)
+            # for visualization
+            flow_duration_gauge.labels(src_ip=ip).set(statistics.mean(data_univariate))
+            for value in data_univariate:
+                flow_duration_gauge.labels(src_ip=ip).set(value) 
+            
             # Update Prometheus (micro-batch) metrics for each device
             flow_duration_gauge.labels(src_ip=f"{ip}_min").set(device_agg_metrics["Flow_Duration_Min"])
             flow_duration_gauge.labels(src_ip=f"{ip}_max").set(device_agg_metrics["Flow_Duration_Max"])
-            flow_duration_gauge.labels(src_ip=ip).set(device_agg_metrics["Flow_Duration_Mean"])
-           
+            flow_duration_gauge.labels(src_ip=f"{ip}_mean").set(device_agg_metrics["Flow_Duration_Mean"])
+            
             batch_min_flow= device_agg_metrics["Flow_Duration_Min"]
             batch_max_flow = device_agg_metrics["Flow_Duration_Max"]
         
@@ -201,6 +240,61 @@ def main():
             device_df = batch_df.filter(col("Src_IP") == ip)
             if device_df.rdd.isEmpty():
                 continue
+                
+            # Collect the data for the device
+            device_data = device_df.select("Idle_Min", "Src_IP","Flow_Duration", "Tot_Fwd_Pkts", "Tot_Bwd_Pkts", "Label").toPandas()
+            if device_data.empty:
+                continue
+            print(device_data)
+
+            # CUSUM record metrics
+            data_univariate = device_data['Idle_Min'].values.tolist() 
+            print(data_univariate)
+            # for cusum visualization
+            idle_min_mean_gauge.labels(src_ip=ip).set(statistics.mean(data_univariate))
+            for value in data_univariate:
+                idle_min_gauge.labels(src_ip=ip).set(value) 
+            
+            # Update CUSUM drift detectors
+            device_cusum_detectors[ip].update_drift(data_univariate, None)  # Pass None for multivariate
+
+            # Check for cusum drift events
+            drift_events = device_cusum_detectors[ip].check_drift(ip)
+            print("drift_events")
+            print(drift_events)
+            for event in drift_events:
+                print(f"CUSUM: Device {ip}: {event} at epoch {epoch_id}")
+
+           # Make predictions and update DDM
+            X_test = device_data[["Flow_Duration", "Tot_Fwd_Pkts", "Tot_Bwd_Pkts"]].values
+            y_true = device_data["Label"].values
+            correct_predictions = 0
+
+            for i in range(len(X_test)):
+                y_pred = device_ddm_detectors[ip].classifier.predict([X_test[i]])
+                drift_state = device_ddm_detectors[ip].ddm.update(y_true[i], y_pred[0])
+
+                # Track prediction accuracy
+                if y_pred[0] == y_true[i]:
+                    correct_predictions += 1
+
+
+                if drift_state == "drift":
+                    evaluation_metrics[ip]["detected_drifts"] += 1
+                    print(f"DDM Drift detected for Device {ip} at epoch {epoch_id}")
+                    # Optionally retrain model with recent data
+                    device_ddm_detectors[ip].retrain_model()
+                elif drift_state == "warning":
+                    evaluation_metrics[ip]["detected_warnings"] += 1
+                    print(f"DDM Warning for Device {ip} at epoch {epoch_id}")
+                
+            batch_accuracy = correct_predictions / len(X_test)
+            evaluation_metrics[ip]["accuracy"].append(batch_accuracy)
+            print(f"Device {ip} - Batch Accuracy: {batch_accuracy:.2f}")
+
+             # Log accuracy to Prometheus
+            flow_duration_gauge.labels(src_ip=f"{ip}_accuracy").set(batch_accuracy)
+
 
             device_data = device_df.select(
                 "Idle_Min", "Idle_Max", "Idle_Mean", "Idle_Std",
@@ -272,6 +366,8 @@ def main():
         # Log the latency for debugging
         print(f"Batch processed in {latency:.2f} seconds")
 
+        report_metrics()
+        
     query = df_parsed.writeStream \
         .outputMode("append") \
         .foreachBatch(record_metrics) \
@@ -280,6 +376,7 @@ def main():
         .start()
 
     query.awaitTermination()
+
 
 if __name__ == "__main__":
     main()
