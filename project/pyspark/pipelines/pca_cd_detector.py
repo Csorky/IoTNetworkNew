@@ -18,7 +18,7 @@ class DevicePCACDDetectors:
         """
         Initialize PCA-CD detectors with required parameters.
         """
-        self.pca_cd = PCACD(window_size=window_size, sample_period=0.05, delta=0.01, ev_threshold=0.95)
+        self.pca_cd = PCACD(window_size=window_size, sample_period=0.05, delta=0.001, ev_threshold=0.95)
     def update_drift(self, data_multivariate):
         """
         Update PCA-CD detector with new data.
