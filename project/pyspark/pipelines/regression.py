@@ -1,13 +1,14 @@
 import pandas as pd
 import lightgbm as lgb
-
+from prometheus_client import Counter, Gauge
+import numpy as np
 
 class DeviceRegressionDetector:
     """
     Handles streaming-based LightGBM predictions for multiple devices using lagged features.
     """
 
-    def __init__(self, lags=5, threshold=20):
+    def __init__(self, lags=5, threshold=100):
         """
         Initializes a dictionary of LightGBM models and lag values for each device.
 
@@ -22,6 +23,37 @@ class DeviceRegressionDetector:
         self.lag_values = {}  # Dictionary to store lag values for each device
         self._prepare_initial_data()
 
+        # Prometheus metrics
+        self.mae_gauge = Gauge(
+            "device_mean_absolute_error", 
+            "Mean Absolute Error for predictions", 
+            ['src_ip']
+        )
+        self.rmse_gauge = Gauge(
+            "device_root_mean_squared_error", 
+            "Root Mean Squared Error for predictions", 
+            ['src_ip']
+        )
+        self.alert_count = Counter(
+            "device_prediction_alert_count", 
+            "Count of alerts for significant prediction differences", 
+            ['src_ip']
+        )
+        self.error_rate_gauge = Gauge(
+            "device_error_rate", 
+            "Proportion of predictions exceeding threshold", 
+            ['src_ip']
+        )
+        self.predicted_values_gauge = Gauge(
+            "device_predicted_value", 
+            "Last predicted value for each device", 
+            ['src_ip']
+        )
+        self.actual_values_gauge = Gauge(
+            "device_actual_value", 
+            "Last actual value for each device", 
+            ['src_ip']
+        )
     def _prepare_initial_data(self):
         """
         Prepare the initial dataset for training models for each device.
@@ -55,63 +87,55 @@ class DeviceRegressionDetector:
     def initialize_device(self, device_ip):
         """
         Initialize a device model and lag values if not already initialized.
-
-        Parameters:
-            device_ip (str): IP address of the device.
         """
         if device_ip not in self.models:
             self.models[device_ip] = lgb.LGBMRegressor()
             self.lag_values[device_ip] = [None] * self.lags
+            self.data_buffer[device_ip] = []
 
     def update_and_predict(self, device_ip, values):
         """
-        Update the lag values for a device with new streaming data and make predictions.
-
-        Parameters:
-            device_ip (str): IP address of the device.
-            values (list of float): List of new 'Idle_Min' values.
-
-        Returns:
-            list of float: List of predictions for the new data.
+        Update lag values and predict in batches for a device.
         """
         if device_ip not in self.models:
             self.initialize_device(device_ip)
 
         predictions = []
+        lag_values = self.lag_values[device_ip]
+
         for new_value in values:
-            lag_values = self.lag_values[device_ip]
-
-            # Skip prediction if lag values are not initialized properly
-            if None in lag_values:
-                lag_values.pop(0)
-                lag_values.append(new_value)
-                continue
-
-            # Predict using the current lag values
-            input_features = [lag_values]
-            prediction = self.models[device_ip].predict(input_features)[0]
-            predictions.append(prediction)
-
-            # Update lag values
             lag_values.pop(0)
             lag_values.append(new_value)
+
+            # Skip if lag values are incomplete
+            if None in lag_values:
+                continue
+
+            # Predict in batch
+            prediction = self.models[device_ip].predict([lag_values])[0]
+            self.predicted_values_gauge.labels(src_ip=device_ip).set(prediction)  # Log predicted value
+            predictions.append(prediction)
 
         return predictions
 
     def compare_predictions(self, device_ip, actual_values, predicted_values):
         """
-        Compare actual and predicted values to detect significant differences.
-
-        Parameters:
-            device_ip (str): IP address of the device.
-            actual_values (list of float): List of actual 'Idle_Min' values.
-            predicted_values (list of float): List of predicted values.
-
-        Returns:
-            None
+        Compare actual and predicted values, log metrics, and retrain if needed.
         """
-        for actual, predicted in zip(actual_values, predicted_values):
-            difference = abs(actual - predicted)
-            print(f"Device {device_ip}: Actual={actual}, Predicted={predicted}, Difference={difference}")
+        differences = [abs(a - p) for a, p in zip(actual_values, predicted_values)]
+        mae = np.mean(differences)
+        rmse = np.sqrt(np.mean([d**2 for d in differences]))
+        error_rate = sum(1 for diff in differences if diff > self.threshold) / len(differences)
+
+        # Log metrics to Prometheus
+        self.mae_gauge.labels(src_ip=device_ip).set(mae)
+        self.rmse_gauge.labels(src_ip=device_ip).set(rmse)
+        self.error_rate_gauge.labels(src_ip=device_ip).set(error_rate)
+
+        # Check for alerts and retrain if difference exceeds threshold
+        for actual, predicted, difference in zip(actual_values, predicted_values, differences):
+            self.actual_values_gauge.labels(src_ip=device_ip).set(actual)  # Log actual value
             if difference > self.threshold:
+                print(f"Device {device_ip}: Actual={actual}, Predicted={predicted}, Difference={difference}")
+                self.alert_count.labels(src_ip=device_ip).inc()
                 print(f"Alert: Significant prediction difference for {device_ip}: {difference}")

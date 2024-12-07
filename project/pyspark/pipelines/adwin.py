@@ -1,7 +1,17 @@
 from menelaus.change_detection import ADWIN
-from prometheus_client import start_http_server, Counter, Gauge
+from prometheus_client import Gauge, Counter
 
-adwin_all_mean = Gauge("adwin_all_mean", "", ['src_ip'])
+# Prometheus metrics
+adwin_mean_value_gauge = Gauge("adwin_mean_value", "Monitored variable mean value for ADWIN detection", ['src_ip'])
+adwin_monitored_value_gauge = Gauge("adwin_monitored_value", "Monitored variable value for ADWIN detection", ['src_ip'])
+adwin_drift_count = Counter("adwin_drift_count", "Count of drifts detected by ADWIN", ['src_ip'])
+adwin_data_points_processed = Counter("adwin_data_points_processed", "Number of data points processed per device", ['src_ip'])
+adwin_last_drift_value = Gauge("adwin_last_drift_value","",['src_ip'])
+adwin_samples_since_reset = Gauge("adwin_samples_since_reset","",['src_ip'])
+adwin_retraining_start = Gauge("adwin_retraining_start","",['src_ip'])
+adwin_retraining_end = Gauge("adwin_retraining_end","",['src_ip'])
+
+
 
 
 class DeviceADWINDetector:
@@ -45,17 +55,28 @@ class DeviceADWINDetector:
 
         for value in values:
             detector.update(X=value)
+
+            # Increment the number of data points processed
+            adwin_data_points_processed.labels(src_ip=device_ip).inc()
+
+            # Update monitored value and mean for Prometheus
+            adwin_monitored_value_gauge.labels(src_ip=device_ip).set(value)
+            adwin_mean_value_gauge.labels(src_ip=device_ip).set(detector.mean())
+
             if detector.drift_state == "drift":
-                # Add the mean and adjusted period to the drift event details
                 drift_events.append({
                     "value": value,
                     "state": "drift",
-                    "mean": detector.mean(),  # Current mean of the monitored stream
-                    # "adjusted_period": detector.width  # Width of the ADWIN window
+                    "mean": detector.mean()
                 })
+                adwin_last_drift_value.labels(src_ip=device_ip).set(value)
+                adwin_samples_since_reset.labels(src_ip=device_ip).set(detector.samples_since_reset)
+                adwin_retraining_start.labels(src_ip=device_ip).set(detector.retraining_recs[0])
+                adwin_retraining_end.labels(src_ip=device_ip).set(detector.retraining_recs[1])
 
-            adwin_all_mean.labels(src_ip=device_ip).set(detector.mean())  # Set mean value
 
+                # Increment drift count
+                adwin_drift_count.labels(src_ip=device_ip).inc()
 
         return drift_events
 
@@ -75,6 +96,5 @@ class DeviceADWINDetector:
         detector = self.detectors[device_ip]
         return {
             "drift_state": detector.drift_state,
-            "mean": detector.mean,
-            "adjusted_period": detector.width
+            "mean": detector.mean()
         }
