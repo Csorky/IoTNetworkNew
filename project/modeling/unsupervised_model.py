@@ -1,44 +1,51 @@
-# dbscan_model.py
+# kmeans_model.py
 
 import pandas as pd
-from sklearn.cluster import DBSCAN
+from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 import plotly.express as px
 
-class DBSCANModel:
-    def __init__(self, eps=0.5, min_samples=5, metric='euclidean', n_components=2):
+class KMeansModel:
+    def __init__(self, n_clusters=5, max_iter=300, random_state=42, n_components=2):
         """
-        Initialize the DBSCANModel.
+        Initialize the KMeansModel.
 
         Parameters:
-        - eps: The maximum distance between two samples for one to be considered as in the neighborhood of the other.
-        - min_samples: The number of samples in a neighborhood for a point to be considered as a core point.
-        - metric: The metric to use when calculating distance between instances in a feature array.
+        - n_clusters: The number of clusters to form.
+        - max_iter: Maximum number of iterations of the k-means algorithm for a single run.
+        - random_state: Determines random number generation for centroid initialization.
         - n_components: Number of components for PCA dimensionality reduction for visualization.
         """
-        self.eps = eps
-        self.min_samples = min_samples
-        self.metric = metric
+        self.n_clusters = n_clusters
+        self.max_iter = max_iter
+        self.random_state = random_state
         self.n_components = n_components
         self.scaler = StandardScaler()
-        self.pca = PCA(n_components=self.n_components)
-        self.dbscan = DBSCAN(eps=self.eps, min_samples=self.min_samples, metric=self.metric, algorithm="kd_tree")
+        self.pca = PCA(n_components=self.n_components, random_state=self.random_state)
+        self.kmeans = KMeans(
+            n_clusters=self.n_clusters,
+            max_iter=self.max_iter,
+            random_state=self.random_state,
+            n_init='auto'  # Updated to 'auto' for scikit-learn 1.4+
+        )
         self.labels = None
         self.data_pca = None
 
     def fit(self, data):
         """
-        Fit the DBSCAN model to the data.
+        Fit the KMeans model to the data.
 
         Parameters:
         - data: pandas DataFrame containing the features to cluster.
         """
         # Standardize the data
         scaled_data = self.scaler.fit_transform(data)
-        # Apply DBSCAN
-        self.dbscan.fit(scaled_data)
-        self.labels = self.dbscan.labels_
+        
+        # Apply KMeans
+        self.kmeans.fit(scaled_data)
+        self.labels = self.kmeans.labels_
+        
         # For visualization, reduce to 2 dimensions
         self.data_pca = self.pca.fit_transform(scaled_data)
 
@@ -51,7 +58,7 @@ class DBSCANModel:
         """
         return self.labels
 
-    def visualize_clusters(self, original_data, label_column='Label', timestamp_column='Timestamp'):
+    def visualize_clusters(self, original_data, label_column='Cat', timestamp_column='Timestamp'):
         """
         Visualize the clusters using Plotly.
 
@@ -72,9 +79,8 @@ class DBSCANModel:
             timestamp_column: original_data[timestamp_column]
         })
 
-        # Replace noise points (-1) with a separate label
+        # Convert clusters to string for better plotting
         plot_df['Cluster'] = plot_df['Cluster'].astype(str)
-        plot_df['Cluster'] = plot_df['Cluster'].replace({'-1': 'Noise'})
 
         # Create the scatter plot
         fig = px.scatter(
@@ -84,13 +90,14 @@ class DBSCANModel:
             color='Cluster',
             symbol=label_column,
             hover_data=[timestamp_column],
-            title='DBSCAN Clustering Results',
+            title='KMeans Clustering Results',
             width=800,
             height=600
         )
 
         fig.update_layout(legend_title_text='Clusters')
         fig.show()
+
 
 
     

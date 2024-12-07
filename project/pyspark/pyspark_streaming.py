@@ -181,7 +181,7 @@ def main():
     streaming_detector = DeviceRegressionDetector()
     
      #Initialize PCA detectors
-    device_pca_cd_detectors = {ip: DevicePCACDDetectors(window_size=100) for ip in device_ips}
+    device_pca_cd_detectors = {ip: DevicePCACDDetectors(window_size=20) for ip in device_ips}
 
     # Initialize MD3 detectors
     # Read initial training data from a static CSV file
@@ -525,7 +525,6 @@ def main():
             change_score = device_pca_cd_detectors[ip].get_latest_change_score()
             if change_score is not None:
                 pca_change_score_gauge.labels(src_ip=ip).set(change_score)
-
 
             num_pcs = device_pca_cd_detectors[ip].get_num_pcs()
             if num_pcs is not None:
