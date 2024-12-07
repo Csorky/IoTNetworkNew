@@ -7,7 +7,8 @@ import os
 from fs import correlation, filter_data, shapiro_wilk_test
 from load_data import fetch_dataset
 from supervised_model import supervisedModel
-from unsupervised_model import KMeansModel  # Import the KMeansModel class
+from unsupervised_model import KMeansModel, DBSCANModel
+import pandas as pd
 
 def main():
 
@@ -30,6 +31,8 @@ def main():
     drop_columns = ["Unnamed: 0", "result", "table", "_start", "_stop", "_time", "_measurement", "host"]
     existing_drop_columns = [col for col in drop_columns if col in data.columns]
     data.drop(existing_drop_columns, axis=1, inplace=True)
+
+    # data = pd.read_csv('../data/iot_network_intrusion_dataset_full.csv')
 
     data_numeric = data.select_dtypes([np.number])
     non_numeric_cols = list(set(data.columns) - set(data_numeric.columns))
@@ -65,7 +68,7 @@ def main():
     print(bin_classifier.metrics)
 
     # KMeans Clustering
-    print("\nPerforming KMeans clustering...")
+    # print("\nPerforming KMeans clustering...")
 
     # Select features for clustering (exclude non-numeric and target columns)
     features_for_clustering = data_res.drop(['Label', 'Cat', 'Sub_Cat', 'Timestamp', 'Dst_IP', 'Src_IP', 'Flow_ID'], axis=1)
@@ -83,6 +86,23 @@ def main():
     kmeans.visualize_clusters(data_res)
     print("KMeans visualization completed.")
 
+    # #DBSCAN Clustering
+    # print("\nPerforming DBSCAN clustering...")
+    
+    # # Select features for clustering (exclude non-numeric and target columns)
+    # print(features_for_clustering.columns)
+
+    # dbscan = DBSCANModel(eps=0.75, min_samples=20, metric='euclidean', n_components=2)
+    # dbscan.fit(features_for_clustering)
+    # cluster_labels = dbscan.get_labels()
+
+    # data_res['DBSCAN_Cluster'] = cluster_labels
+    # print("DBSCAN clustering completed.")
+
+    # print("Visualizing DBSCAN clusters...")
+    # dbscan.visualize_clusters(data_res)
+
+    # print("DBSCAN visualization completed.")
 if __name__ == "__main__":
-    time.sleep(600)
+    time.sleep(1000)
     main()
