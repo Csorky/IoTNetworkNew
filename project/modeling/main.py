@@ -1,4 +1,5 @@
 # main.py
+import pandas as pd
 import numpy as np
 import time
 from datetime import datetime, timedelta
@@ -49,20 +50,37 @@ def main():
     # Modeling step
     print("Building binary classification model...")
 
-    config = {
+    config_bin = {
         'target': 'Label',
         'model': 'decision_tree',
-        'metrics': ['accuracy', 'precision', 'recall', 'f1']
+        'metrics': ['accuracy', 'precision', 'recall', 'f1', 'confusion_matrix']
     }
     
-    bin_classifier = supervisedModel(data_res, config)
+    bin_classifier = supervisedModel(data_res, config_bin)
     bin_classifier.split_data()
     bin_classifier.init_and_train_model()
     bin_classifier.predict_val()
     bin_classifier.get_metrics()
 
-    print("Supervised Model Metrics:")
+    print("Model Metrics:")
     print(bin_classifier.metrics)
+
+    print("Building multiclass classification model...")
+
+    config_multi = {
+        'target': 'Cat',
+        'model': 'decision_tree',
+        'metrics': ['accuracy', 'precision', 'recall', 'f1', 'confusion_matrix']
+    }
+    
+    multi_classifier = supervisedModel(data_res, config_multi)
+    multi_classifier.split_data()
+    multi_classifier.init_and_train_model()
+    multi_classifier.predict_val()
+    multi_classifier.get_metrics()
+
+    print("Model Metrics:")
+    print(multi_classifier.metrics)
 
     # KMeans Clustering
     print("\nPerforming KMeans clustering...")
