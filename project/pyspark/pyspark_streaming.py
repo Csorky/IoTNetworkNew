@@ -21,8 +21,12 @@ import numpy as np
 from pipelines.cusum_change_detector import CusumDriftDetector
 from pipelines.ddm_drift_detection import DeviceDDMDetector
 from pyspark.sql.functions import from_json, col, min as spark_min, max as spark_max, mean as spark_mean
+
 from sklearn.preprocessing import LabelEncoder
+
 from pipelines.LFR.LFR_drift_detection import LFRDriftDetector
+from pipelines.metrics_bwd_pkt import general_metrics
+
 
 
 
@@ -84,7 +88,7 @@ def main():
         StructField("Src_Port", IntegerType(), True),
         StructField("Dst_IP", StringType(), True),
         StructField("Dst_Port", IntegerType(), True),
-        StructField("Protocol", StringType(), True),
+        StructField("Protocol", IntegerType(), True),
         StructField("Flow_Duration", FloatType(), True),
         StructField("Tot_Fwd_Pkts", IntegerType(), True),
         StructField("Tot_Bwd_Pkts", IntegerType(), True),
@@ -101,7 +105,7 @@ def main():
         StructField("Timestamp", StringType(), True),
         StructField("Flow_Byts/s", FloatType(), True),
         StructField("Flow_Pkts/s", FloatType(), True),
-        StructField("Bwd_Pkt_Len_Max", FloatType(), True)
+        StructField("Bwd_Pkt_Len_Max", FloatType(), True),
     ])
 
     # maxOffsetsPerTrigger limits the number of records read from Kafka in each micro-batch.
@@ -137,6 +141,13 @@ def main():
     }
     # LFR init----------------------------------------------------------------------------------------------------------------------------------------------------
     
+    # General metrics init----------------------------------------------------------------------------------------------------------------------------------------------------
+    variables_general = ["Idle_Mean", "Idle_Min", "Bwd_Pkt_Len_Max", "Protocol", "Flow_Pkts/s"]
+
+    general_detectors = {ip : general_metrics(variable_name="Bwd_Pkt_Len_Max", ip=ip, window_size=80) for ip in device_ips}
+
+    # General metrics init----------------------------------------------------------------------------------------------------------------------------------------------------
+
     # Initialize drift detectors for each device
     device_ph_detectors = DevicePageHinkleyDetector(delta=0.01, threshold=20, burn_in=30)
     device_adwin_detectors = DeviceADWINDetector(delta=0.1)
@@ -537,6 +548,14 @@ def main():
             # Update the LFR detector with new data
             detector.update(lfr_data)
         # LFR--------------------------------------------------------------------------------------------------------------------------------------------------
+        
+        # General metrics --------------------------------------------------------------------------------------------------------------------------------------------------
+            bwd_df = device_df.select(variables_general).toPandas()[variables_general]
+            print(bwd_df.head())
+
+            general_detectors[ip].update(bwd_df)
+        # General metrics --------------------------------------------------------------------------------------------------------------------------------------------------
+
 
         end_time = time.time()
         latency = end_time - start_time
